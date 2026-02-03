@@ -1,0 +1,17 @@
+{
+  "name": "bun-db-tool",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "cd frontend && bun run dev",
+    "build": "cd frontend && bun run build",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "workspaces": [
+    "frontend"
+  ],
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}
