@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.bun/
+.env
+target/
+*.sql
+src-tauri/target/
+.DS_Store
