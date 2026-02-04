@@ -27,6 +27,36 @@ struct ApiResponse<T> {
     data: Option<T>,
 }
 
+// New types for database explorer
+#[derive(Serialize, Deserialize, Clone)]
+struct TableInfo {
+    name: String,
+    schema: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    row_count: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ColumnInfo {
+    name: String,
+    #[serde(rename = "type")]
+    data_type: String,
+    nullable: bool,
+    #[serde(rename = "isPrimaryKey")]
+    is_primary_key: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TableData {
+    columns: Vec<ColumnInfo>,
+    rows: Vec<serde_json::Value>,
+    #[serde(rename = "totalRows")]
+    total_rows: i64,
+    page: u32,
+    #[serde(rename = "pageSize")]
+    page_size: u32,
+}
+
 fn get_config_path() -> PathBuf {
     let project_config = PathBuf::from("config.json");
     if project_config.exists() {
@@ -316,6 +346,389 @@ async fn get_log_dir_path() -> Result<String, String> {
     Ok(log_dir.to_string_lossy().to_string())
 }
 
+// Database Explorer APIs
+#[tauri::command]
+async fn list_tables(database: String) -> Result<ApiResponse<Vec<TableInfo>>, String> {
+    log::info!("========== 列出表 ==========");
+    log::info!("数据库: {}", database);
+    
+    let config = get_db_config();
+    
+    let query = "SELECT 
+        schemaname as schema, 
+        tablename as name,
+        n_live_tup as row_count
+    FROM pg_stat_user_tables 
+    ORDER BY schemaname, tablename";
+    
+    let output = std::process::Command::new("psql")
+        .arg("-h").arg(&config.host)
+        .arg("-p").arg(&config.port)
+        .arg("-U").arg(&config.user)
+        .arg("-d").arg(&database)
+        .arg("-t")
+        .arg("-A")
+        .arg("-F").arg("|")
+        .arg("-c").arg(query)
+        .env("PGPASSWORD", &config.password)
+        .output()
+        .map_err(|e| format!("无法执行 psql: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("查询表列表失败: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let tables: Vec<TableInfo> = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 2 {
+                Some(TableInfo {
+                    schema: parts[0].trim().to_string(),
+                    name: parts[1].trim().to_string(),
+                    row_count: parts.get(2).and_then(|s| s.trim().parse().ok()),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    log::info!("找到 {} 个表", tables.len());
+
+    Ok(ApiResponse {
+        success: true,
+        message: format!("找到 {} 个表", tables.len()),
+        data: Some(tables),
+    })
+}
+
+#[tauri::command]
+async fn get_table_data(
+    database: String,
+    table: String,
+    page: u32,
+    page_size: u32,
+) -> Result<ApiResponse<TableData>, String> {
+    log::info!("========== 查询表数据 ==========");
+    log::info!("数据库: {}, 表: {}, 页: {}, 每页: {}", database, table, page, page_size);
+    
+    let config = get_db_config();
+    
+    // Get column information
+    let column_query = format!(
+        "SELECT 
+            a.attname as name,
+            pg_catalog.format_type(a.atttypid, a.atttypmod) as type,
+            NOT a.attnotnull as nullable,
+            COALESCE((SELECT true FROM pg_index i WHERE i.indrelid = a.attrelid AND a.attnum = ANY(i.indkey) AND i.indisprimary), false) as is_primary_key
+        FROM pg_catalog.pg_attribute a
+        WHERE a.attrelid = '{}'::regclass
+        AND a.attnum > 0
+        AND NOT a.attisdropped
+        ORDER BY a.attnum",
+        table
+    );
+    
+    let column_output = std::process::Command::new("psql")
+        .arg("-h").arg(&config.host)
+        .arg("-p").arg(&config.port)
+        .arg("-U").arg(&config.user)
+        .arg("-d").arg(&database)
+        .arg("-t")
+        .arg("-A")
+        .arg("-F").arg("|")
+        .arg("-c").arg(&column_query)
+        .env("PGPASSWORD", &config.password)
+        .output()
+        .map_err(|e| format!("无法查询列信息: {}", e))?;
+
+    if !column_output.status.success() {
+        let stderr = String::from_utf8_lossy(&column_output.stderr);
+        return Err(format!("查询列信息失败: {}", stderr));
+    }
+
+    let column_stdout = String::from_utf8_lossy(&column_output.stdout);
+    let columns: Vec<ColumnInfo> = column_stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() >= 4 {
+                Some(ColumnInfo {
+                    name: parts[0].trim().to_string(),
+                    data_type: parts[1].trim().to_string(),
+                    nullable: parts[2].trim() == "t",
+                    is_primary_key: parts[3].trim() == "t",
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Get total row count
+    let count_query = format!("SELECT COUNT(*) FROM {}", table);
+    let count_output = std::process::Command::new("psql")
+        .arg("-h").arg(&config.host)
+        .arg("-p").arg(&config.port)
+        .arg("-U").arg(&config.user)
+        .arg("-d").arg(&database)
+        .arg("-t")
+        .arg("-c").arg(&count_query)
+        .env("PGPASSWORD", &config.password)
+        .output()
+        .map_err(|e| format!("无法查询行数: {}", e))?;
+
+    let total_rows: i64 = String::from_utf8_lossy(&count_output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+
+    // Get paginated data
+    let offset = (page - 1) * page_size;
+    let data_query = format!(
+        "SELECT * FROM {} LIMIT {} OFFSET {}",
+        table, page_size, offset
+    );
+    
+    let data_output = std::process::Command::new("psql")
+        .arg("-h").arg(&config.host)
+        .arg("-p").arg(&config.port)
+        .arg("-U").arg(&config.user)
+        .arg("-d").arg(&database)
+        .arg("-t")
+        .arg("-A")
+        .arg("-F").arg("|")
+        .arg("-c").arg(&data_query)
+        .env("PGPASSWORD", &config.password)
+        .output()
+        .map_err(|e| format!("无法查询数据: {}", e))?;
+
+    if !data_output.status.success() {
+        let stderr = String::from_utf8_lossy(&data_output.stderr);
+        return Err(format!("查询数据失败: {}", stderr));
+    }
+
+    let data_stdout = String::from_utf8_lossy(&data_output.stdout);
+    let rows: Vec<serde_json::Value> = data_stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let values: Vec<&str> = line.split('|').collect();
+            let mut row = serde_json::Map::new();
+            for (i, col) in columns.iter().enumerate() {
+                if let Some(value) = values.get(i) {
+                    row.insert(col.name.clone(), serde_json::Value::String(value.to_string()));
+                }
+            }
+            serde_json::Value::Object(row)
+        })
+        .collect();
+
+    log::info!("返回 {} 行数据，总共 {} 行", rows.len(), total_rows);
+
+    Ok(ApiResponse {
+        success: true,
+        message: format!("查询成功，返回 {} 行", rows.len()),
+        data: Some(TableData {
+            columns,
+            rows,
+            total_rows,
+            page,
+            page_size,
+        }),
+    })
+}
+
+#[tauri::command]
+async fn create_record(
+    database: String,
+    table: String,
+    data: serde_json::Value,
+) -> Result<ApiResponse<()>, String> {
+    log::info!("========== 创建记录 ==========");
+    log::info!("数据库: {}, 表: {}", database, table);
+    
+    let config = get_db_config();
+    
+    let obj = data.as_object().ok_or("数据必须是对象")?;
+    
+    let columns: Vec<String> = obj.keys().cloned().collect();
+    let values: Vec<String> = obj.values()
+        .map(|v| match v {
+            serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::Bool(b) => b.to_string(),
+            serde_json::Value::Null => "NULL".to_string(),
+            _ => format!("'{}'", v.to_string().replace("'", "''")),
+        })
+        .collect();
+    
+    let insert_query = format!(
+        "INSERT INTO {} ({}) VALUES ({})",
+        table,
+        columns.join(", "),
+        values.join(", ")
+    );
+    
+    log::info!("执行 SQL: {}", insert_query);
+    
+    let output = std::process::Command::new("psql")
+        .arg("-h").arg(&config.host)
+        .arg("-p").arg(&config.port)
+        .arg("-U").arg(&config.user)
+        .arg("-d").arg(&database)
+        .arg("-c").arg(&insert_query)
+        .env("PGPASSWORD", &config.password)
+        .output()
+        .map_err(|e| format!("无法执行插入: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("插入失败: {}", stderr));
+    }
+
+    log::info!("记录创建成功");
+
+    Ok(ApiResponse {
+        success: true,
+        message: "记录创建成功".to_string(),
+        data: None,
+    })
+}
+
+#[tauri::command]
+async fn update_record(
+    database: String,
+    table: String,
+    primary_key: serde_json::Value,
+    data: serde_json::Value,
+) -> Result<ApiResponse<()>, String> {
+    log::info!("========== 更新记录 ==========");
+    log::info!("数据库: {}, 表: {}", database, table);
+    
+    let config = get_db_config();
+    
+    let pk_obj = primary_key.as_object().ok_or("主键必须是对象")?;
+    let data_obj = data.as_object().ok_or("数据必须是对象")?;
+    
+    let set_clauses: Vec<String> = data_obj.iter()
+        .map(|(k, v)| {
+            let value_str = match v {
+                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => "NULL".to_string(),
+                _ => format!("'{}'", v.to_string().replace("'", "''")),
+            };
+            format!("{} = {}", k, value_str)
+        })
+        .collect();
+    
+    let where_clauses: Vec<String> = pk_obj.iter()
+        .map(|(k, v)| {
+            let value_str = match v {
+                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => format!("'{}'", v.to_string().replace("'", "''")),
+            };
+            format!("{} = {}", k, value_str)
+        })
+        .collect();
+    
+    let update_query = format!(
+        "UPDATE {} SET {} WHERE {}",
+        table,
+        set_clauses.join(", "),
+        where_clauses.join(" AND ")
+    );
+    
+    log::info!("执行 SQL: {}", update_query);
+    
+    let output = std::process::Command::new("psql")
+        .arg("-h").arg(&config.host)
+        .arg("-p").arg(&config.port)
+        .arg("-U").arg(&config.user)
+        .arg("-d").arg(&database)
+        .arg("-c").arg(&update_query)
+        .env("PGPASSWORD", &config.password)
+        .output()
+        .map_err(|e| format!("无法执行更新: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("更新失败: {}", stderr));
+    }
+
+    log::info!("记录更新成功");
+
+    Ok(ApiResponse {
+        success: true,
+        message: "记录更新成功".to_string(),
+        data: None,
+    })
+}
+
+#[tauri::command]
+async fn delete_record(
+    database: String,
+    table: String,
+    primary_key: serde_json::Value,
+) -> Result<ApiResponse<()>, String> {
+    log::info!("========== 删除记录 ==========");
+    log::info!("数据库: {}, 表: {}", database, table);
+    
+    let config = get_db_config();
+    
+    let pk_obj = primary_key.as_object().ok_or("主键必须是对象")?;
+    
+    let where_clauses: Vec<String> = pk_obj.iter()
+        .map(|(k, v)| {
+            let value_str = match v {
+                serde_json::Value::String(s) => format!("'{}'", s.replace("'", "''")),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => format!("'{}'", v.to_string().replace("'", "''")),
+            };
+            format!("{} = {}", k, value_str)
+        })
+        .collect();
+    
+    let delete_query = format!(
+        "DELETE FROM {} WHERE {}",
+        table,
+        where_clauses.join(" AND ")
+    );
+    
+    log::info!("执行 SQL: {}", delete_query);
+    
+    let output = std::process::Command::new("psql")
+        .arg("-h").arg(&config.host)
+        .arg("-p").arg(&config.port)
+        .arg("-U").arg(&config.user)
+        .arg("-d").arg(&database)
+        .arg("-c").arg(&delete_query)
+        .env("PGPASSWORD", &config.password)
+        .output()
+        .map_err(|e| format!("无法执行删除: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("删除失败: {}", stderr));
+    }
+
+    log::info!("记录删除成功");
+
+    Ok(ApiResponse {
+        success: true,
+        message: "记录删除成功".to_string(),
+        data: None,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     setup_logger().expect("无法设置日志");
@@ -333,7 +746,12 @@ pub fn run() {
             list_databases,
             check_health,
             get_export_dir_path,
-            get_log_dir_path
+            get_log_dir_path,
+            list_tables,
+            get_table_data,
+            create_record,
+            update_record,
+            delete_record
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");

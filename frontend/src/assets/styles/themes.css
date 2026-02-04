@@ -1,0 +1,17 @@
+/* Dark theme overrides */
+[data-theme='dark'] {
+  --color-background: #18181c;
+  --color-background-secondary: #24242a;
+  --color-surface: #24242a;
+
+  --color-text: #ffffffd1;
+  --color-text-secondary: #ffffff99;
+  --color-text-tertiary: #ffffff66;
+
+  --color-border: #ffffff1a;
+  --color-divider: #ffffff0d;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
