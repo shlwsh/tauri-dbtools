@@ -52,7 +52,7 @@ function parseArguments(): Config {
   const args = process.argv.slice(2);
   
   const config: Config = {
-    remote: 'origin',
+    remote: '', // 将在后面自动检测
     dryRun: false,
   };
 
@@ -95,6 +95,30 @@ async function getCurrentBranch(): Promise<string> {
     return result.trim();
   } catch {
     throw new Error('无法获取当前分支');
+  }
+}
+
+/**
+ * 获取默认远程仓库
+ */
+async function getDefaultRemote(): Promise<string> {
+  try {
+    // 尝试获取所有远程仓库
+    const result = await $`git remote`.text();
+    const remotes = result.trim().split('\n').filter(Boolean);
+    
+    if (remotes.length === 0) {
+      throw new Error('没有配置远程仓库');
+    }
+    
+    // 优先使用 origin，否则使用第一个
+    if (remotes.includes('origin')) {
+      return 'origin';
+    }
+    
+    return remotes[0];
+  } catch {
+    throw new Error('无法获取远程仓库');
   }
 }
 
@@ -314,6 +338,17 @@ async function main() {
   // 获取当前分支
   const currentBranch = await getCurrentBranch();
   const targetBranch = config.branch || currentBranch;
+  
+  // 获取远程仓库（如果未指定）
+  if (!config.remote) {
+    try {
+      config.remote = await getDefaultRemote();
+    } catch (error) {
+      print.error(`${error}`);
+      print.info('提示: 使用 --remote 参数指定远程仓库');
+      process.exit(1);
+    }
+  }
   
   print.info(`当前分支: ${currentBranch}`);
   print.info(`目标分支: ${targetBranch}`);
