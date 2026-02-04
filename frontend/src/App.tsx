@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { exportDatabase, importDatabase, listDatabases, checkHealth, getExportDirPath, ApiResponse } from './api';
+import { exportDatabase, importDatabase, listDatabases, checkHealth, getExportDirPath, getLogDirPath, testPgTools, ApiResponse } from './api';
 import { open } from '@tauri-apps/plugin-dialog';
 
 function App() {
@@ -11,11 +11,13 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [serverStatus, setServerStatus] = useState<'online' | 'offline' | 'checking'>('checking');
   const [exportDir, setExportDir] = useState<string>('');
+  const [logDir, setLogDir] = useState<string>('');
 
   useEffect(() => {
     checkServerHealth();
     loadDatabases();
     loadExportDir();
+    loadLogDir();
   }, []);
 
   const loadExportDir = async () => {
@@ -27,12 +29,32 @@ function App() {
     }
   };
 
+  const loadLogDir = async () => {
+    try {
+      const dir = await getLogDirPath();
+      setLogDir(dir);
+    } catch (error) {
+      console.error('Failed to load log directory:', error);
+    }
+  };
+
   const checkServerHealth = async () => {
     try {
       const response = await checkHealth();
       setServerStatus(response.success ? 'online' : 'offline');
     } catch (error) {
       setServerStatus('offline');
+    }
+  };
+
+  const handleTestPgTools = async () => {
+    try {
+      const response = await testPgTools();
+      if (response.success && response.data) {
+        alert(response.data);
+      }
+    } catch (error: any) {
+      alert('Failed to test PostgreSQL tools: ' + (error?.message || error));
     }
   };
 
@@ -66,8 +88,10 @@ function App() {
       } else {
         showMessage('error', response.message);
       }
-    } catch (error) {
-      showMessage('error', 'Export failed');
+    } catch (error: any) {
+      console.error('Export error:', error);
+      const errorMessage = error?.message || error?.toString() || 'Export failed with unknown error';
+      showMessage('error', errorMessage);
     } finally {
       setIsLoading(false);
     }
@@ -78,8 +102,8 @@ function App() {
       const selected = await open({
         multiple: false,
         filters: [{
-          name: 'SQL Files',
-          extensions: ['sql']
+          name: 'PostgreSQL Backup Files',
+          extensions: ['backup', 'sql', 'gz']
         }]
       });
       
@@ -108,8 +132,10 @@ function App() {
       } else {
         showMessage('error', response.message);
       }
-    } catch (error) {
-      showMessage('error', 'Import failed');
+    } catch (error: any) {
+      console.error('Import error:', error);
+      const errorMessage = error?.message || error?.toString() || 'Import failed with unknown error';
+      showMessage('error', errorMessage);
     } finally {
       setIsLoading(false);
     }
@@ -137,6 +163,17 @@ function App() {
             Refresh
           </button>
         </div>
+        {logDir && (
+          <div style={{ marginTop: '10px', fontSize: '12px', color: '#666' }}>
+            <span style={{ fontWeight: 'bold' }}>Log directory:</span> {logDir}
+            <button 
+              onClick={handleTestPgTools}
+              style={{ marginLeft: '10px', padding: '4px 8px', fontSize: '12px', cursor: 'pointer' }}
+            >
+              Test PG Tools
+            </button>
+          </div>
+        )}
       </header>
 
       {message && (

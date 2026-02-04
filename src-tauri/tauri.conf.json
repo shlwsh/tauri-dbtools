@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.pgdbtool.app",
   "build": {
-    "beforeDevCommand": "bun run dev",
-    "beforeBuildCommand": "bun run build",
-    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": "cd frontend && bun run dev",
+    "beforeBuildCommand": "cd frontend && bun run build",
+    "devUrl": "http://localhost:8200",
     "frontendDist": "../frontend/dist"
   },
   "app": {
@@ -18,15 +18,17 @@
         "resizable": true,
         "fullscreen": false,
         "minWidth": 800,
-        "minHeight": 600
+        "minHeight": 600,
+        "label": "main"
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "capabilities": ["default"]
     }
   },
   "bundle": {
-    "active": true,
+    "active": false,
     "targets": "all"
   },
   "plugins": {}

@@ -1,0 +1,604 @@
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::path::PathBuf;
+use std::fs::File;
+use std::io::{Write, BufWriter, BufReader, BufRead};
+use tokio_postgres::NoTls;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
+
+#[derive(Serialize, Deserialize)]
+struct ApiResponse<T> {
+    success: bool,
+    message: String,
+    data: Option<T>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DatabaseConfig {
+    host: String,
+    port: String,
+    user: String,
+    password: String,
+}
+
+fn get_export_dir() -> Result<PathBuf, String> {
+    let mut export_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+    export_dir.push("pg-db-tool-exports");
+    std::fs::create_dir_all(&export_dir)
+        .map_err(|e| format!("Failed to create export directory: {}", e))?;
+    Ok(export_dir)
+}
+
+fn get_log_dir() -> Result<PathBuf, String> {
+    let mut log_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+    log_dir.push("pg-db-tool-logs");
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|e| format!("Failed to create log directory: {}", e))?;
+    Ok(log_dir)
+}
+
+fn get_db_config() -> DatabaseConfig {
+    DatabaseConfig {
+        host: env::var("PG_HOST").unwrap_or_else(|_| "localhost".to_string()),
+        port: env::var("PG_PORT").unwrap_or_else(|_| "5432".to_string()),
+        user: env::var("PG_USER").unwrap_or_else(|_| "postgres".to_string()),
+        password: env::var("PG_PASSWORD").unwrap_or_else(|_| "postgres".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn export_database(database: String) -> Result<ApiResponse<String>, String> {
+    log::info!("========== Starting database export (Pure Rust) ==========");
+    log::info!("Database: {}", database);
+    
+    let config = get_db_config();
+    log::info!("Database config - Host: {}, Port: {}, User: {}", config.host, config.port, config.user);
+    
+    let export_dir = match get_export_dir() {
+        Ok(dir) => {
+            log::info!("Export directory: {}", dir.display());
+            dir
+        }
+        Err(e) => {
+            log::error!("Failed to get export directory: {}", e);
+            return Err(e);
+        }
+    };
+    
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("{}_{}.sql.gz", database, timestamp);
+    let file_path = export_dir.join(&filename);
+    log::info!("Export file path: {}", file_path.display());
+
+    // 连接到数据库
+    let conn_str = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    log::info!("Connecting to database...");
+    let (client, connection) = match tokio_postgres::connect(&conn_str, NoTls).await {
+        Ok(conn) => {
+            log::info!("Connected successfully");
+            conn
+        }
+        Err(e) => {
+            log::error!("Failed to connect to database: {}", e);
+            return Err(format!("Failed to connect to database: {}", e));
+        }
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            log::error!("Connection error: {}", e);
+        }
+    });
+
+    // 创建压缩文件
+    log::info!("Creating export file...");
+    let file = match File::create(&file_path) {
+        Ok(f) => f,
+        Err(e) => {
+            log::error!("Failed to create file: {}", e);
+            return Err(format!("Failed to create file: {}", e));
+        }
+    };
+    
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut writer = BufWriter::new(encoder);
+
+    // 写入 SQL 头部
+    writeln!(writer, "-- PostgreSQL database dump").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "-- Database: {}", database).map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "-- Exported at: {}", chrono::Utc::now()).map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "SET statement_timeout = 0;").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "SET lock_timeout = 0;").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "SET client_encoding = 'UTF8';").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "").map_err(|e| format!("Write error: {}", e))?;
+
+    // 获取所有表
+    log::info!("Fetching table list...");
+    let tables_query = "
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'public' 
+        AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+    ";
+    
+    let tables = match client.query(tables_query, &[]).await {
+        Ok(rows) => {
+            let table_names: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+            log::info!("Found {} tables", table_names.len());
+            table_names
+        }
+        Err(e) => {
+            log::error!("Failed to fetch tables: {}", e);
+            return Err(format!("Failed to fetch tables: {}", e));
+        }
+    };
+
+    // 导出每个表的结构和数据
+    for table_name in &tables {
+        log::info!("Exporting table: {}", table_name);
+        
+        // 获取表结构
+        let create_table_query = format!(
+            "SELECT 'CREATE TABLE ' || quote_ident(table_name) || ' (' || 
+             string_agg(column_definition, ', ') || ');' as create_statement
+             FROM (
+                 SELECT 
+                     table_name,
+                     quote_ident(column_name) || ' ' || 
+                     data_type || 
+                     CASE WHEN character_maximum_length IS NOT NULL 
+                          THEN '(' || character_maximum_length || ')' 
+                          ELSE '' END ||
+                     CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END as column_definition
+                 FROM information_schema.columns
+                 WHERE table_schema = 'public' AND table_name = '{}'
+                 ORDER BY ordinal_position
+             ) AS columns
+             GROUP BY table_name",
+            table_name
+        );
+        
+        match client.query_one(&create_table_query, &[]).await {
+            Ok(row) => {
+                let create_stmt: String = row.get(0);
+                writeln!(writer, "\n-- Table: {}", table_name).map_err(|e| format!("Write error: {}", e))?;
+                writeln!(writer, "DROP TABLE IF EXISTS {} CASCADE;", table_name).map_err(|e| format!("Write error: {}", e))?;
+                writeln!(writer, "{}", create_stmt).map_err(|e| format!("Write error: {}", e))?;
+            }
+            Err(e) => {
+                log::warn!("Failed to get CREATE TABLE for {}: {}", table_name, e);
+            }
+        }
+
+        // 导出数据
+        let data_query = format!("SELECT * FROM {}", table_name);
+        match client.query(&data_query, &[]).await {
+            Ok(rows) => {
+                if !rows.is_empty() {
+                    log::info!("Exporting {} rows from {}", rows.len(), table_name);
+                    writeln!(writer, "\n-- Data for table: {}", table_name).map_err(|e| format!("Write error: {}", e))?;
+                    
+                    for row in rows {
+                        let mut values = Vec::new();
+                        for i in 0..row.len() {
+                            let value: Option<String> = row.try_get(i).ok();
+                            match value {
+                                Some(v) => values.push(format!("'{}'", v.replace("'", "''"))),
+                                None => values.push("NULL".to_string()),
+                            }
+                        }
+                        writeln!(writer, "INSERT INTO {} VALUES ({});", table_name, values.join(", "))
+                            .map_err(|e| format!("Write error: {}", e))?;
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to export data from {}: {}", table_name, e);
+            }
+        }
+    }
+
+    // 完成写入
+    writer.flush().map_err(|e| format!("Flush error: {}", e))?;
+    drop(writer);
+
+    // 检查文件大小
+    match file_path.metadata() {
+        Ok(metadata) => {
+            log::info!("Export completed successfully, file size: {} bytes", metadata.len());
+        }
+        Err(e) => {
+            log::warn!("Cannot read file metadata: {}", e);
+        }
+    }
+
+    log::info!("========== Export completed ==========");
+
+    Ok(ApiResponse {
+        success: true,
+        message: format!("Database exported successfully to {}", file_path.display()),
+        data: Some(file_path.to_string_lossy().to_string()),
+    })
+}
+
+#[tauri::command]
+async fn import_database(file_path: String, database: String) -> Result<ApiResponse<()>, String> {
+    log::info!("========== Starting database import ==========");
+    log::info!("Database: {}", database);
+    log::info!("Import file: {}", file_path);
+    
+    let config = get_db_config();
+    log::info!("Database config - Host: {}, Port: {}, User: {}", config.host, config.port, config.user);
+    
+    let path = PathBuf::from(&file_path);
+
+    if !path.exists() {
+        log::error!("File not found: {}", file_path);
+        return Err(format!("File not found: {}", file_path));
+    }
+    
+    let file_size = match path.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(e) => {
+            log::error!("Failed to get file metadata: {}", e);
+            return Err(format!("Failed to get file metadata: {}", e));
+        }
+    };
+    log::info!("File exists, size: {} bytes", file_size);
+
+    let conn_str = format!(
+        "host={} port={} user={} password={}",
+        config.host, config.port, config.user, config.password
+    );
+
+    log::info!("Connecting to PostgreSQL server...");
+    let (client, connection) = match tokio_postgres::connect(&conn_str, NoTls).await {
+        Ok(conn) => {
+            log::info!("Connection established successfully");
+            conn
+        }
+        Err(e) => {
+            log::error!("Failed to connect to database: {}", e);
+            log::error!("Connection string (without password): host={} port={} user={}", config.host, config.port, config.user);
+            return Err(format!("Failed to connect to database: {}. Please check if PostgreSQL is running and credentials are correct.", e));
+        }
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            log::error!("Connection error: {}", e);
+        }
+    });
+
+    // 检查数据库是否存在
+    log::info!("Checking if database '{}' exists...", database);
+    let check_db = match client
+        .query("SELECT 1 FROM pg_database WHERE datname = $1", &[&database])
+        .await
+    {
+        Ok(rows) => {
+            log::info!("Database check query executed successfully");
+            rows
+        }
+        Err(e) => {
+            log::error!("Failed to check database existence: {}", e);
+            return Err(format!("Failed to check database: {}", e));
+        }
+    };
+
+    if !check_db.is_empty() {
+        log::info!("Database '{}' exists, will drop and recreate it", database);
+        
+        // 需要先断开所有连接
+        log::info!("Terminating existing connections to database '{}'...", database);
+        let terminate_query = format!(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}' AND pid <> pg_backend_pid()",
+            database
+        );
+        log::info!("Executing: {}", terminate_query);
+        
+        match client.execute(&terminate_query, &[]).await {
+            Ok(terminated) => {
+                log::info!("Terminated {} connections", terminated);
+            }
+            Err(e) => {
+                log::error!("Failed to terminate connections: {}", e);
+                return Err(format!("Failed to terminate connections: {}", e));
+            }
+        }
+
+        log::info!("Dropping database '{}'...", database);
+        let drop_query = format!("DROP DATABASE IF EXISTS \"{}\"", database);
+        log::info!("Executing: {}", drop_query);
+        
+        match client.execute(&drop_query, &[]).await {
+            Ok(_) => {
+                log::info!("Database dropped successfully");
+            }
+            Err(e) => {
+                log::error!("Failed to drop existing database: {}", e);
+                return Err(format!("Failed to drop existing database: {}", e));
+            }
+        }
+    } else {
+        log::info!("Database '{}' does not exist, will create new one", database);
+    }
+
+    // 创建新数据库
+    log::info!("Creating database '{}'...", database);
+    let create_query = format!("CREATE DATABASE \"{}\"", database);
+    log::info!("Executing: {}", create_query);
+    
+    match client.execute(&create_query, &[]).await {
+        Ok(_) => {
+            log::info!("Database created successfully");
+        }
+        Err(e) => {
+            log::error!("Failed to create database: {}", e);
+            return Err(format!("Failed to create database: {}", e));
+        }
+    }
+
+    // 使用 pg_restore 导入二进制格式的备份
+    log::info!("Preparing to execute pg_restore...");
+    log::info!("Command: pg_restore -h {} -p {} -U {} -d {} -v --no-owner --no-acl {}", 
+        config.host, config.port, config.user, database, file_path);
+    
+    let mut cmd = Command::new("pg_restore");
+    cmd.arg("-h")
+        .arg(&config.host)
+        .arg("-p")
+        .arg(&config.port)
+        .arg("-U")
+        .arg(&config.user)
+        .arg("-d")
+        .arg(&database)
+        .arg("-v")  // Verbose
+        .arg("--no-owner")  // Skip ownership restoration
+        .arg("--no-acl")    // Skip access privileges
+        .arg(&path)
+        .env("PGPASSWORD", &config.password);
+    
+    log::info!("Executing pg_restore command...");
+    let output = match cmd.output().await {
+        Ok(out) => {
+            log::info!("pg_restore command executed");
+            out
+        }
+        Err(e) => {
+            log::error!("Failed to execute pg_restore command: {}", e);
+            log::error!("Error details: {:?}", e);
+            return Err(format!("Failed to execute pg_restore: {}. Make sure pg_restore is installed and in PATH.", e));
+        }
+    };
+
+    log::info!("pg_restore exit status: {}", output.status);
+    log::info!("pg_restore exit code: {:?}", output.status.code());
+    
+    // 记录完整的 stdout
+    if !output.stdout.is_empty() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        log::info!("========== pg_restore stdout START ==========");
+        for line in stdout.lines() {
+            log::info!("STDOUT: {}", line);
+        }
+        log::info!("========== pg_restore stdout END ==========");
+    } else {
+        log::info!("pg_restore stdout is empty");
+    }
+    
+    // 记录完整的 stderr
+    if !output.stderr.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::info!("========== pg_restore stderr START ==========");
+        for line in stderr.lines() {
+            if line.to_lowercase().contains("error") {
+                log::error!("STDERR: {}", line);
+            } else if line.to_lowercase().contains("warning") {
+                log::warn!("STDERR: {}", line);
+            } else {
+                log::info!("STDERR: {}", line);
+            }
+        }
+        log::info!("========== pg_restore stderr END ==========");
+        
+        // 检查是否有真正的错误
+        let has_error = stderr.lines().any(|line| {
+            let lower = line.to_lowercase();
+            lower.contains("error:") || lower.contains("fatal:")
+        });
+        
+        if has_error {
+            log::error!("pg_restore encountered errors during import");
+            return Err(format!("pg_restore failed with errors. Check logs for details.\n\nError output:\n{}", stderr));
+        }
+    } else {
+        log::info!("pg_restore stderr is empty");
+    }
+
+    if !output.status.success() {
+        log::warn!("pg_restore exited with non-zero status code: {:?}", output.status.code());
+        log::warn!("However, this may not indicate failure - checking for actual errors in output");
+    } else {
+        log::info!("pg_restore exited with success status");
+    }
+
+    log::info!("Database import completed successfully");
+    log::info!("========== Import completed ==========");
+
+    Ok(ApiResponse {
+        success: true,
+        message: format!("Database {} imported successfully", database),
+        data: None,
+    })
+}
+
+#[tauri::command]
+async fn list_databases() -> Result<ApiResponse<Vec<String>>, String> {
+    let config = get_db_config();
+
+    let conn_str = format!(
+        "host={} port={} user={} password={}",
+        config.host, config.port, config.user, config.password
+    );
+
+    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+        .await
+        .map_err(|e| format!("Failed to connect to database: {}", e))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {}", e);
+        }
+    });
+
+    let rows = client
+        .query(
+            "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+            &[],
+        )
+        .await
+        .map_err(|e| format!("Failed to query databases: {}", e))?;
+
+    let databases: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+
+    Ok(ApiResponse {
+        success: true,
+        message: "Databases listed successfully".to_string(),
+        data: Some(databases),
+    })
+}
+
+#[tauri::command]
+async fn check_health() -> Result<ApiResponse<()>, String> {
+    Ok(ApiResponse {
+        success: true,
+        message: "Server is running".to_string(),
+        data: None,
+    })
+}
+
+#[tauri::command]
+async fn get_export_dir_path() -> Result<String, String> {
+    let export_dir = get_export_dir()?;
+    Ok(export_dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn get_log_dir_path() -> Result<String, String> {
+    let log_dir = get_log_dir()?;
+    Ok(log_dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn test_pg_tools() -> Result<ApiResponse<String>, String> {
+    log::info!("Testing PostgreSQL tools availability...");
+    
+    let mut results = Vec::new();
+    
+    // Test pg_dump
+    match Command::new("pg_dump").arg("--version").output().await {
+        Ok(output) => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            log::info!("pg_dump found: {}", version.trim());
+            results.push(format!("✓ pg_dump: {}", version.trim()));
+        }
+        Err(e) => {
+            log::error!("pg_dump not found: {}", e);
+            results.push(format!("✗ pg_dump: Not found - {}", e));
+        }
+    }
+    
+    // Test pg_restore
+    match Command::new("pg_restore").arg("--version").output().await {
+        Ok(output) => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            log::info!("pg_restore found: {}", version.trim());
+            results.push(format!("✓ pg_restore: {}", version.trim()));
+        }
+        Err(e) => {
+            log::error!("pg_restore not found: {}", e);
+            results.push(format!("✗ pg_restore: Not found - {}", e));
+        }
+    }
+    
+    // Test psql
+    match Command::new("psql").arg("--version").output().await {
+        Ok(output) => {
+            let version = String::from_utf8_lossy(&output.stdout);
+            log::info!("psql found: {}", version.trim());
+            results.push(format!("✓ psql: {}", version.trim()));
+        }
+        Err(e) => {
+            log::error!("psql not found: {}", e);
+            results.push(format!("✗ psql: Not found - {}", e));
+        }
+    }
+    
+    let result_text = results.join("\n");
+    
+    Ok(ApiResponse {
+        success: true,
+        message: "PostgreSQL tools check completed".to_string(),
+        data: Some(result_text),
+    })
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    // 初始化日志系统
+    setup_logger().expect("Failed to setup logger");
+    
+    log::info!("========================================");
+    log::info!("PostgreSQL Database Tool Starting...");
+    log::info!("========================================");
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            export_database,
+            import_database,
+            list_databases,
+            check_health,
+            get_export_dir_path,
+            get_log_dir_path,
+            test_pg_tools
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+fn setup_logger() -> Result<(), fern::InitError> {
+    let log_dir = get_log_dir().expect("Failed to get log directory");
+    let log_file = log_dir.join(format!(
+        "pg-db-tool_{}.log",
+        chrono::Local::now().format("%Y%m%d")
+    ));
+
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{} {} {}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.target(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Info)
+        .level_for("tokio_postgres", log::LevelFilter::Warn)
+        .chain(std::io::stdout())
+        .chain(fern::log_file(log_file)?)
+        .apply()?;
+
+    Ok(())
+}

@@ -10,8 +10,11 @@ export async function exportDatabase(database: string): Promise<ApiResponse<stri
   return await invoke('export_database', { database });
 }
 
-export async function importDatabase(file_path: string, database: string): Promise<ApiResponse<void>> {
-  return await invoke('import_database', { file_path, database });
+export async function importDatabase(filePath: string, database: string): Promise<ApiResponse<void>> {
+  return await invoke('import_database', { 
+    filePath: filePath,
+    database: database 
+  });
 }
 
 export async function listDatabases(): Promise<ApiResponse<string[]>> {
@@ -24,4 +27,12 @@ export async function checkHealth(): Promise<ApiResponse<void>> {
 
 export async function getExportDirPath(): Promise<string> {
   return await invoke('get_export_dir_path');
+}
+
+export async function getLogDirPath(): Promise<string> {
+  return await invoke('get_log_dir_path');
+}
+
+export async function testPgTools(): Promise<ApiResponse<string>> {
+  return await invoke('test_pg_tools');
 }

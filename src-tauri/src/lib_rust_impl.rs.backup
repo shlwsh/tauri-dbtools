@@ -1,0 +1,678 @@
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::path::PathBuf;
+use std::fs::File;
+use std::io::{Write, BufWriter, BufReader, BufRead, Read};
+use tokio_postgres::NoTls;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Config {
+    database: DatabaseConfig,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct DatabaseConfig {
+    host: String,
+    port: String,
+    user: String,
+    password: String,
+    #[serde(default)]
+    default_database: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ApiResponse<T> {
+    success: bool,
+    message: String,
+    data: Option<T>,
+}
+
+fn get_config_path() -> PathBuf {
+    // 优先使用项目根目录的 config.json
+    let project_config = PathBuf::from("config.json");
+    if project_config.exists() {
+        return project_config;
+    }
+    
+    // 否则使用用户目录的配置
+    if let Some(mut home) = dirs::home_dir() {
+        home.push(".pg-db-tool");
+        std::fs::create_dir_all(&home).ok();
+        home.push("config.json");
+        return home;
+    }
+    
+    PathBuf::from("config.json")
+}
+
+fn load_config() -> Config {
+    let config_path = get_config_path();
+    
+    if config_path.exists() {
+        if let Ok(mut file) = File::open(&config_path) {
+            let mut contents = String::new();
+            if file.read_to_string(&mut contents).is_ok() {
+                if let Ok(config) = serde_json::from_str::<Config>(&contents) {
+                    log::info!("Loaded config from: {}", config_path.display());
+                    return config;
+                }
+            }
+        }
+    }
+    
+    // 返回默认配置
+    log::warn!("Using default config");
+    Config {
+        database: DatabaseConfig {
+            host: "localhost".to_string(),
+            port: "5432".to_string(),
+            user: "postgres".to_string(),
+            password: "postgres".to_string(),
+            default_database: "personnel_db".to_string(),
+        }
+    }
+}
+
+fn get_db_config() -> DatabaseConfig {
+    // 优先使用环境变量，否则使用配置文件
+    let config = load_config();
+    
+    DatabaseConfig {
+        host: env::var("PG_HOST").unwrap_or(config.database.host),
+        port: env::var("PG_PORT").unwrap_or(config.database.port),
+        user: env::var("PG_USER").unwrap_or(config.database.user),
+        password: env::var("PG_PASSWORD").unwrap_or(config.database.password),
+        default_database: config.database.default_database,
+    }
+}
+
+fn get_export_dir() -> Result<PathBuf, String> {
+    let mut export_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+    export_dir.push("pg-db-tool-exports");
+    std::fs::create_dir_all(&export_dir)
+        .map_err(|e| format!("Failed to create export directory: {}", e))?;
+    Ok(export_dir)
+}
+
+fn get_log_dir() -> Result<PathBuf, String> {
+    let mut log_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+    log_dir.push("pg-db-tool-logs");
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|e| format!("Failed to create log directory: {}", e))?;
+    Ok(log_dir)
+}
+
+// 纯 Rust 实现的导出功能
+#[tauri::command]
+async fn export_database(database: String) -> Result<ApiResponse<String>, String> {
+    log::info!("========== Starting database export (Pure Rust) ==========");
+    log::info!("Database: {}", database);
+    
+    let config = get_db_config();
+    let export_dir = get_export_dir()?;
+    
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("{}_{}.sql.gz", database, timestamp);
+    let file_path = export_dir.join(&filename);
+    
+    // 连接到数据库
+    let conn_str = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls).await
+        .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            log::error!("Connection error: {}", e);
+        }
+    });
+
+    // 创建压缩文件
+    let file = File::create(&file_path).map_err(|e| format!("Failed to create file: {}", e))?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut writer = BufWriter::new(encoder);
+
+    // 写入 SQL 头部
+    writeln!(writer, "-- PostgreSQL database dump").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "SET client_encoding = 'UTF8';").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "SET standard_conforming_strings = on;").map_err(|e| format!("Write error: {}", e))?;
+    writeln!(writer, "").map_err(|e| format!("Write error: {}", e))?;
+
+    // 获取所有序列
+    log::info!("Exporting sequences...");
+    let sequences_query = "SELECT sequence_name FROM information_schema.sequences WHERE sequence_schema = 'public' ORDER BY sequence_name";
+    let sequences = client.query(sequences_query, &[]).await
+        .map_err(|e| format!("Failed to fetch sequences: {}", e))?;
+    
+    for seq_row in &sequences {
+        let seq_name: String = seq_row.get(0);
+        log::info!("Exporting sequence: {}", seq_name);
+        
+        // 获取序列定义
+        let seq_info = client.query_one(
+            &format!("SELECT last_value, increment_by, min_value, max_value FROM \"{}\"", seq_name),
+            &[]
+        ).await;
+        
+        if let Ok(info) = seq_info {
+            let last_value: i64 = info.get(0);
+            let increment: i64 = info.get(1);
+            let min_value: i64 = info.get(2);
+            let max_value: i64 = info.get(3);
+            
+            writeln!(writer, "\n-- Sequence: {}", seq_name).map_err(|e| format!("Write error: {}", e))?;
+            writeln!(writer, "DROP SEQUENCE IF EXISTS \"{}\" CASCADE;", seq_name).map_err(|e| format!("Write error: {}", e))?;
+            writeln!(writer, "CREATE SEQUENCE \"{}\" INCREMENT {} MINVALUE {} MAXVALUE {} START {};", 
+                seq_name, increment, min_value, max_value, last_value).map_err(|e| format!("Write error: {}", e))?;
+            writeln!(writer, "SELECT setval('\"{}\", {}, true);", seq_name, last_value).map_err(|e| format!("Write error: {}", e))?;
+        }
+    }
+
+    // 获取所有表
+    let tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name";
+    let tables = client.query(tables_query, &[]).await
+        .map_err(|e| format!("Failed to fetch tables: {}", e))?;
+
+    let mut total_tables = 0;
+    let mut total_rows = 0;
+
+    for table_row in &tables {
+        let table_name: String = table_row.get(0);
+        log::info!("Exporting table: {}", table_name);
+        total_tables += 1;
+        
+        // 获取列信息和数据类型
+        let columns_query = format!(
+            "SELECT column_name, udt_name, character_maximum_length, is_nullable, column_default
+             FROM information_schema.columns 
+             WHERE table_schema = 'public' AND table_name = $1
+             ORDER BY ordinal_position"
+        );
+        
+        let columns = client.query(&columns_query, &[&table_name]).await
+            .map_err(|e| format!("Failed to get columns for {}: {}", table_name, e))?;
+        
+        if columns.is_empty() {
+            log::warn!("Table {} has no columns, skipping", table_name);
+            continue;
+        }
+        
+        // 生成 CREATE TABLE 语句
+        writeln!(writer, "\n-- Table: {}", table_name).map_err(|e| format!("Write error: {}", e))?;
+        writeln!(writer, "DROP TABLE IF EXISTS \"{}\" CASCADE;", table_name).map_err(|e| format!("Write error: {}", e))?;
+        write!(writer, "CREATE TABLE \"{}\" (\n", table_name).map_err(|e| format!("Write error: {}", e))?;
+        
+        for (i, col) in columns.iter().enumerate() {
+            let col_name: String = col.get(0);
+            let data_type: String = col.get(1); // udt_name gives us the actual type
+            let max_length: Option<i32> = col.get(2);
+            let is_nullable: String = col.get(3);
+            let col_default: Option<String> = col.get(4);
+            
+            if i > 0 {
+                write!(writer, ",\n").map_err(|e| format!("Write error: {}", e))?;
+            }
+            
+            write!(writer, "  \"{}\" ", col_name).map_err(|e| format!("Write error: {}", e))?;
+            
+            // 处理数据类型
+            match data_type.as_str() {
+                "varchar" | "bpchar" => {
+                    if let Some(len) = max_length {
+                        write!(writer, "character varying({})", len).map_err(|e| format!("Write error: {}", e))?;
+                    } else {
+                        write!(writer, "character varying").map_err(|e| format!("Write error: {}", e))?;
+                    }
+                },
+                "int4" => write!(writer, "integer").map_err(|e| format!("Write error: {}", e))?,
+                "int8" => write!(writer, "bigint").map_err(|e| format!("Write error: {}", e))?,
+                "int2" => write!(writer, "smallint").map_err(|e| format!("Write error: {}", e))?,
+                "float4" => write!(writer, "real").map_err(|e| format!("Write error: {}", e))?,
+                "float8" => write!(writer, "double precision").map_err(|e| format!("Write error: {}", e))?,
+                "bool" => write!(writer, "boolean").map_err(|e| format!("Write error: {}", e))?,
+                "timestamptz" => write!(writer, "timestamp with time zone").map_err(|e| format!("Write error: {}", e))?,
+                "timestamp" => write!(writer, "timestamp without time zone").map_err(|e| format!("Write error: {}", e))?,
+                _ => write!(writer, "{}", data_type).map_err(|e| format!("Write error: {}", e))?,
+            }
+            
+            if is_nullable == "NO" {
+                write!(writer, " NOT NULL").map_err(|e| format!("Write error: {}", e))?;
+            }
+            
+            // Skip DEFAULT clauses that reference sequences - we'll handle them after sequences are created
+            if let Some(default) = col_default {
+                if !default.contains("nextval") {
+                    write!(writer, " DEFAULT {}", default).map_err(|e| format!("Write error: {}", e))?;
+                }
+            }
+        }
+        
+        writeln!(writer, "\n);").map_err(|e| format!("Write error: {}", e))?;
+
+        // 导出数据 - 使用引号包裹表名
+        let data_query = format!("SELECT * FROM \"{}\"", table_name);
+        let rows = match client.query(&data_query, &[]).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("Failed to query data from {}: {}", table_name, e);
+                continue;
+            }
+        };
+        
+        if !rows.is_empty() {
+            log::info!("  {} rows in table {}", rows.len(), table_name);
+            total_rows += rows.len();
+            writeln!(writer, "\n-- Data for table: {} ({} rows)", table_name, rows.len()).map_err(|e| format!("Write error: {}", e))?;
+            
+            // 获取列名和类型
+            let col_info: Vec<(String, String)> = columns.iter().map(|col| {
+                let name: String = col.get(0);
+                let dtype: String = col.get(1);
+                (name, dtype)
+            }).collect();
+            
+            for (row_idx, row) in rows.iter().enumerate() {
+                let mut col_names_for_insert = Vec::new();
+                let mut values = Vec::new();
+                
+                for (i, (col_name, col_type)) in col_info.iter().enumerate() {
+                    // Check if this column has a sequence default
+                    let has_seq_default = columns.iter().any(|col| {
+                        let name: String = col.get(0);
+                        let default: Option<String> = col.get(4);
+                        name == *col_name && default.as_ref().map_or(false, |d| d.contains("nextval"))
+                    });
+                    
+                    let value = match col_type.as_str() {
+                        "int2" | "int4" | "int8" => {
+                            if let Ok(Some(v)) = row.try_get::<_, Option<i64>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                v.to_string()
+                            } else if let Ok(Some(v)) = row.try_get::<_, Option<i32>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                v.to_string()
+                            } else if let Ok(Some(v)) = row.try_get::<_, Option<i16>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                v.to_string()
+                            } else {
+                                // NULL value - skip if has sequence default
+                                if !has_seq_default {
+                                    col_names_for_insert.push(col_name.clone());
+                                    "NULL".to_string()
+                                } else {
+                                    continue;
+                                }
+                            }
+                        },
+                        "uuid" => {
+                            // Handle UUID type
+                            if let Ok(Some(v)) = row.try_get::<_, Option<uuid::Uuid>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                format!("'{}'", v)
+                            } else {
+                                // NULL UUID - skip if has gen_random_uuid() default
+                                let has_uuid_default = columns.iter().any(|col| {
+                                    let name: String = col.get(0);
+                                    let default: Option<String> = col.get(4);
+                                    name == *col_name && default.as_ref().map_or(false, |d| d.contains("gen_random_uuid"))
+                                });
+                                if !has_uuid_default {
+                                    col_names_for_insert.push(col_name.clone());
+                                    "NULL".to_string()
+                                } else {
+                                    continue;
+                                }
+                            }
+                        },
+                        "float4" | "float8" | "numeric" => {
+                            if let Ok(Some(v)) = row.try_get::<_, Option<f64>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                v.to_string()
+                            } else if let Ok(Some(v)) = row.try_get::<_, Option<f32>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                v.to_string()
+                            } else {
+                                col_names_for_insert.push(col_name.clone());
+                                "NULL".to_string()
+                            }
+                        },
+                        "bool" => {
+                            if let Ok(Some(v)) = row.try_get::<_, Option<bool>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                if v { "true" } else { "false" }.to_string()
+                            } else {
+                                col_names_for_insert.push(col_name.clone());
+                                "NULL".to_string()
+                            }
+                        },
+                        _ => {
+                            // 所有其他类型作为字符串处理
+                            if let Ok(Some(s)) = row.try_get::<_, Option<String>>(i) {
+                                col_names_for_insert.push(col_name.clone());
+                                // 转义单引号和反斜杠
+                                let escaped = s.replace("\\", "\\\\").replace("'", "''");
+                                format!("'{}'", escaped)
+                            } else {
+                                col_names_for_insert.push(col_name.clone());
+                                "NULL".to_string()
+                            }
+                        }
+                    };
+                    values.push(value);
+                }
+                
+                writeln!(writer, "INSERT INTO \"{}\" ({}) VALUES ({});", 
+                    table_name, 
+                    col_names_for_insert.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(", "),
+                    values.join(", ")
+                ).map_err(|e| format!("Write error at row {}: {}", row_idx, e))?;
+            }
+        } else {
+            log::info!("  Table {} is empty", table_name);
+        }
+    }
+
+    log::info!("Exported {} tables with {} total rows", total_tables, total_rows);
+
+    // 添加序列默认值
+    log::info!("Adding sequence defaults...");
+    for table_row in &tables {
+        let table_name: String = table_row.get(0);
+        
+        let seq_defaults_query = "SELECT column_name, column_default 
+                                  FROM information_schema.columns 
+                                  WHERE table_schema = 'public' AND table_name = $1 
+                                  AND column_default LIKE '%nextval%'";
+        
+        if let Ok(seq_cols) = client.query(seq_defaults_query, &[&table_name]).await {
+            for seq_col in seq_cols {
+                let col_name: String = seq_col.get(0);
+                let col_default: String = seq_col.get(1);
+                writeln!(writer, "\nALTER TABLE \"{}\" ALTER COLUMN \"{}\" SET DEFAULT {};",
+                    table_name, col_name, col_default).map_err(|e| format!("Write error: {}", e))?;
+            }
+        }
+    }
+
+    // 导出主键和约束
+    log::info!("Exporting constraints...");
+    for table_row in &tables {
+        let table_name: String = table_row.get(0);
+        
+        // 获取主键
+        let pk_query = "SELECT constraint_name, column_name 
+                        FROM information_schema.key_column_usage 
+                        WHERE table_schema = 'public' AND table_name = $1 
+                        AND constraint_name IN (
+                            SELECT constraint_name FROM information_schema.table_constraints 
+                            WHERE table_schema = 'public' AND table_name = $1 AND constraint_type = 'PRIMARY KEY'
+                        )
+                        ORDER BY ordinal_position";
+        
+        if let Ok(pk_rows) = client.query(pk_query, &[&table_name]).await {
+            if !pk_rows.is_empty() {
+                let pk_name: String = pk_rows[0].get(0);
+                let pk_cols: Vec<String> = pk_rows.iter().map(|r| {
+                    let col: String = r.get(1);
+                    format!("\"{}\"", col)
+                }).collect();
+                
+                writeln!(writer, "\nALTER TABLE \"{}\" ADD CONSTRAINT \"{}\" PRIMARY KEY ({});",
+                    table_name, pk_name, pk_cols.join(", ")).map_err(|e| format!("Write error: {}", e))?;
+            }
+        }
+    }
+
+    // 导出索引
+    log::info!("Exporting indexes...");
+    let indexes_query = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname NOT LIKE '%_pkey' ORDER BY indexname";
+    if let Ok(indexes) = client.query(indexes_query, &[]).await {
+        for idx_row in indexes {
+            let idx_name: String = idx_row.get(0);
+            let idx_def: String = idx_row.get(1);
+            writeln!(writer, "\n{};", idx_def).map_err(|e| format!("Write error: {}", e))?;
+        }
+    }
+
+    writer.flush().map_err(|e| format!("Flush error: {}", e))?;
+    log::info!("========== Export completed ==========");
+
+    Ok(ApiResponse {
+        success: true,
+        message: format!("Database exported to {}", file_path.display()),
+        data: Some(file_path.to_string_lossy().to_string()),
+    })
+}
+
+// 纯 Rust 实现的导入功能
+#[tauri::command]
+async fn import_database(file_path: String, database: String) -> Result<ApiResponse<()>, String> {
+    log::info!("========== Starting database import (Pure Rust) ==========");
+    
+    let config = get_db_config();
+    let path = PathBuf::from(&file_path);
+
+    if !path.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+
+    // 连接到 postgres 数据库
+    let conn_str = format!(
+        "host={} port={} user={} password={}",
+        config.host, config.port, config.user, config.password
+    );
+
+    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls).await
+        .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            log::error!("Connection error: {}", e);
+        }
+    });
+
+    // 检查并删除旧数据库
+    let check_db = client.query("SELECT 1 FROM pg_database WHERE datname = $1", &[&database]).await
+        .map_err(|e| format!("Failed to check database: {}", e))?;
+
+    if !check_db.is_empty() {
+        client.execute(
+            &format!("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{}' AND pid <> pg_backend_pid()", database),
+            &[],
+        ).await.ok();
+        
+        client.execute(&format!("DROP DATABASE IF EXISTS \"{}\"", database), &[]).await
+            .map_err(|e| format!("Failed to drop database: {}", e))?;
+    }
+
+    // 创建新数据库
+    client.execute(&format!("CREATE DATABASE \"{}\"", database), &[]).await
+        .map_err(|e| format!("Failed to create database: {}", e))?;
+
+    drop(client);
+
+    // 连接到新数据库
+    let target_conn_str = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+
+    let (target_client, target_connection) = tokio_postgres::connect(&target_conn_str, NoTls).await
+        .map_err(|e| format!("Failed to connect to target database: {}", e))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = target_connection.await {
+            log::error!("Target connection error: {}", e);
+        }
+    });
+
+    // 读取并执行 SQL 文件
+    let file = File::open(&path).map_err(|e| format!("Failed to open file: {}", e))?;
+    let decoder = GzDecoder::new(file);
+    let reader = BufReader::new(decoder);
+
+    let mut sql_buffer = String::new();
+    let mut statement_count = 0;
+    let mut error_count = 0;
+    let mut create_table_count = 0;
+    let mut insert_count = 0;
+
+    log::info!("Starting SQL execution...");
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("Failed to read line {}: {}", line_num, e))?;
+        let trimmed = line.trim();
+        
+        if trimmed.is_empty() || trimmed.starts_with("--") {
+            continue;
+        }
+
+        sql_buffer.push_str(&line);
+        sql_buffer.push(' ');
+
+        if trimmed.ends_with(';') {
+            let sql = sql_buffer.trim();
+            
+            match target_client.execute(sql, &[]).await {
+                Ok(_) => {
+                    statement_count += 1;
+                    if sql.to_uppercase().starts_with("CREATE TABLE") {
+                        create_table_count += 1;
+                    } else if sql.to_uppercase().starts_with("INSERT INTO") {
+                        insert_count += 1;
+                    }
+                    
+                    if statement_count % 100 == 0 {
+                        log::info!("Executed {} statements...", statement_count);
+                    }
+                },
+                Err(e) => {
+                    error_count += 1;
+                    if error_count <= 10 {
+                        log::error!("Failed to execute statement #{}: {}", statement_count + error_count, e);
+                        log::error!("SQL: {}", if sql.len() > 200 { &sql[..200] } else { sql });
+                    }
+                }
+            }
+            sql_buffer.clear();
+        }
+    }
+
+    log::info!("Executed {} statements successfully ({} CREATE TABLE, {} INSERT)", 
+        statement_count, create_table_count, insert_count);
+    log::info!("{} errors encountered", error_count);
+    log::info!("========== Import completed ==========");
+
+    Ok(ApiResponse {
+        success: true,
+        message: format!("Database {} imported successfully ({} statements, {} errors)", database, statement_count, error_count),
+        data: None,
+    })
+}
+
+#[tauri::command]
+async fn list_databases() -> Result<ApiResponse<Vec<String>>, String> {
+    let config = get_db_config();
+    let conn_str = format!(
+        "host={} port={} user={} password={}",
+        config.host, config.port, config.user, config.password
+    );
+
+    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls).await
+        .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            log::error!("Connection error: {}", e);
+        }
+    });
+
+    let rows = client.query(
+        "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
+        &[],
+    ).await.map_err(|e| format!("Failed to query databases: {}", e))?;
+
+    let databases: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+
+    Ok(ApiResponse {
+        success: true,
+        message: "Databases listed successfully".to_string(),
+        data: Some(databases),
+    })
+}
+
+#[tauri::command]
+async fn check_health() -> Result<ApiResponse<()>, String> {
+    Ok(ApiResponse {
+        success: true,
+        message: "Server is running".to_string(),
+        data: None,
+    })
+}
+
+#[tauri::command]
+async fn get_export_dir_path() -> Result<String, String> {
+    let export_dir = get_export_dir()?;
+    Ok(export_dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn get_log_dir_path() -> Result<String, String> {
+    let log_dir = get_log_dir()?;
+    Ok(log_dir.to_string_lossy().to_string())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    setup_logger().expect("Failed to setup logger");
+    
+    log::info!("========================================");
+    log::info!("PostgreSQL Database Tool Starting (Pure Rust)...");
+    log::info!("========================================");
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            export_database,
+            import_database,
+            list_databases,
+            check_health,
+            get_export_dir_path,
+            get_log_dir_path
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+
+fn setup_logger() -> Result<(), fern::InitError> {
+    let log_dir = get_log_dir().expect("Failed to get log directory");
+    let log_file = log_dir.join(format!(
+        "pg-db-tool_{}.log",
+        chrono::Local::now().format("%Y%m%d")
+    ));
+
+    fern::Dispatch::new()
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{} {} {}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.target(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Info)
+        .level_for("tokio_postgres", log::LevelFilter::Warn)
+        .chain(std::io::stdout())
+        .chain(fern::log_file(log_file)?)
+        .apply()?;
+
+    Ok(())
+}

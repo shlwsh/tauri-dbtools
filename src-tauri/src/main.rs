@@ -1,3 +1,3 @@
 fn main() {
-    pg_db_tool_lib::run()
+    pg_db_tool::run()
 }
