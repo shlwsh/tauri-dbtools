@@ -4,6 +4,20 @@ use std::env;
 use std::path::PathBuf;
 use std::fs::File;
 use std::io::Read;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::collections::HashMap;
+
+// Models module for database advanced features
+pub mod models;
+
+// Services module for business logic
+pub mod services;
+
+use models::query::QueryResult;
+use models::data::BatchOperationResponse;
+use services::query_executor;
+use services::transaction_manager;
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
@@ -25,6 +39,19 @@ struct ApiResponse<T> {
     success: bool,
     message: String,
     data: Option<T>,
+}
+
+// Application state for managing database connections
+struct AppState {
+    connections: Arc<Mutex<HashMap<String, tokio_postgres::Client>>>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            connections: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
 }
 
 // New types for database explorer
@@ -128,6 +155,258 @@ fn get_log_dir() -> Result<PathBuf, String> {
     Ok(log_dir)
 }
 
+// SQL Execution Command
+#[tauri::command]
+async fn execute_sql(
+    database: String,
+    sql: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<QueryResult, String> {
+    log::info!("========== 执行 SQL ==========");
+    log::info!("数据库: {}", database);
+    log::info!("SQL: {}", sql);
+    
+    let config = get_db_config();
+    
+    // Build connection string
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    // Get or create connection
+    let mut connections = state.connections.lock().await;
+    
+    // Check if we have an existing connection for this database
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        // Create new connection
+        log::info!("创建新的数据库连接: {}", connection_key);
+        
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        // Spawn connection handler
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    // Execute SQL
+    let result = query_executor::execute_sql(client, &sql).await;
+    
+    log::info!("SQL 执行完成，耗时: {} ms", result.duration_ms);
+    
+    Ok(result)
+}
+
+// Schema Management Commands
+
+/// Get complete table schema including columns, constraints, and indexes
+#[tauri::command]
+async fn get_table_schema(
+    database: String,
+    schema: String,
+    table: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<models::schema::TableSchema, String> {
+    log::info!("========== 获取表结构 ==========");
+    log::info!("数据库: {}, Schema: {}, 表: {}", database, schema, table);
+    
+    let config = get_db_config();
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let mut connections = state.connections.lock().await;
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    let table_schema = services::schema_service::get_table_schema(client, &schema, &table).await?;
+    
+    log::info!("表结构获取完成");
+    Ok(table_schema)
+}
+
+/// Create a new table based on table design
+#[tauri::command]
+async fn create_table(
+    database: String,
+    design: models::schema::TableDesign,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    log::info!("========== 创建表 ==========");
+    log::info!("数据库: {}, 表: {}.{}", database, design.schema, design.table_name);
+    
+    let config = get_db_config();
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let mut connections = state.connections.lock().await;
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    // Generate DDL
+    let ddl = services::ddl_generator::generate_create_table(&design);
+    log::info!("生成的 DDL:\n{}", ddl);
+    
+    // Execute DDL
+    let result = query_executor::execute_sql(client, &ddl).await;
+    
+    if result.result_type == models::query::QueryResultType::Error {
+        let error_msg = result.error.unwrap_or_else(|| "未知错误".to_string());
+        log::error!("创建表失败: {}", error_msg);
+        return Err(error_msg);
+    }
+    
+    log::info!("表创建成功");
+    Ok(())
+}
+
+/// Alter an existing table based on table changes
+#[tauri::command]
+async fn alter_table(
+    database: String,
+    schema: String,
+    table: String,
+    changes: models::schema::TableChanges,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    log::info!("========== 修改表 ==========");
+    log::info!("数据库: {}, 表: {}.{}", database, schema, table);
+    
+    let config = get_db_config();
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let mut connections = state.connections.lock().await;
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    // Generate ALTER TABLE statements
+    let statements = services::ddl_generator::generate_alter_table(&schema, &table, &changes);
+    log::info!("生成的 ALTER TABLE 语句数量: {}", statements.len());
+    
+    // Execute all statements
+    for (i, statement) in statements.iter().enumerate() {
+        log::info!("执行语句 {}: {}", i + 1, statement);
+        let result = query_executor::execute_sql(client, statement).await;
+        
+        if result.result_type == models::query::QueryResultType::Error {
+            let error_msg = result.error.unwrap_or_else(|| "未知错误".to_string());
+            log::error!("修改表失败 (语句 {}): {}", i + 1, error_msg);
+            return Err(format!("语句 {} 失败: {}", i + 1, error_msg));
+        }
+    }
+    
+    log::info!("表修改成功");
+    Ok(())
+}
+
+/// Get database objects for auto-completion
+#[tauri::command]
+async fn get_database_objects(
+    database: String,
+    object_type: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    log::info!("========== 获取数据库对象 ==========");
+    log::info!("数据库: {}, 对象类型: {}", database, object_type);
+    
+    let config = get_db_config();
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let mut connections = state.connections.lock().await;
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    let objects = services::schema_service::get_database_objects(client, &object_type).await?;
+    
+    log::info!("获取到 {} 个对象", objects.len());
+    Ok(objects)
+}
+
 // 使用 pg_dump 导出数据库
 #[tauri::command]
 async fn export_database(database: String) -> Result<ApiResponse<String>, String> {
@@ -183,16 +462,19 @@ async fn export_database(database: String) -> Result<ApiResponse<String>, String
 
 // 使用 pg_restore 导入数据库
 #[tauri::command]
-async fn import_database(file_path: String, database: String) -> Result<ApiResponse<()>, String> {
+async fn import_database(
+    filePath: String,
+    database: String
+) -> Result<ApiResponse<()>, String> {
     log::info!("========== 开始导入数据库 (pg_restore) ==========");
-    log::info!("文件: {}", file_path);
+    log::info!("文件: {}", filePath);
     log::info!("目标数据库: {}", database);
     
     let config = get_db_config();
-    let path = PathBuf::from(&file_path);
+    let path = PathBuf::from(&filePath);
 
     if !path.exists() {
-        return Err(format!("文件不存在: {}", file_path));
+        return Err(format!("文件不存在: {}", filePath));
     }
 
     // 连接到 postgres 数据库来创建目标数据库
@@ -270,7 +552,7 @@ async fn import_database(file_path: String, database: String) -> Result<ApiRespo
         .arg("-v")  // 详细模式
         .arg("--no-owner")  // 不恢复所有权
         .arg("--no-acl")  // 不恢复访问权限
-        .arg(&file_path)
+        .arg(&filePath)
         .env("PGPASSWORD", &config.password)
         .output()
         .map_err(|e| format!("无法执行 pg_restore: {}", e))?;
@@ -356,10 +638,10 @@ async fn list_tables(database: String) -> Result<ApiResponse<Vec<TableInfo>>, St
     
     let query = "SELECT 
         schemaname as schema, 
-        tablename as name,
+        relname as name,
         n_live_tup as row_count
     FROM pg_stat_user_tables 
-    ORDER BY schemaname, tablename";
+    ORDER BY schemaname, relname";
     
     let output = std::process::Command::new("psql")
         .arg("-h").arg(&config.host)
@@ -411,10 +693,10 @@ async fn get_table_data(
     database: String,
     table: String,
     page: u32,
-    page_size: u32,
+    pageSize: u32,
 ) -> Result<ApiResponse<TableData>, String> {
     log::info!("========== 查询表数据 ==========");
-    log::info!("数据库: {}, 表: {}, 页: {}, 每页: {}", database, table, page, page_size);
+    log::info!("数据库: {}, 表: {}, 页: {}, 每页: {}", database, table, page, pageSize);
     
     let config = get_db_config();
     
@@ -489,10 +771,10 @@ async fn get_table_data(
         .unwrap_or(0);
 
     // Get paginated data
-    let offset = (page - 1) * page_size;
+    let offset = (page - 1) * pageSize;
     let data_query = format!(
         "SELECT * FROM {} LIMIT {} OFFSET {}",
-        table, page_size, offset
+        table, pageSize, offset
     );
     
     let data_output = std::process::Command::new("psql")
@@ -539,7 +821,7 @@ async fn get_table_data(
             rows,
             total_rows,
             page,
-            page_size,
+            page_size: pageSize,
         }),
     })
 }
@@ -605,7 +887,7 @@ async fn create_record(
 async fn update_record(
     database: String,
     table: String,
-    primary_key: serde_json::Value,
+    primaryKey: serde_json::Value,
     data: serde_json::Value,
 ) -> Result<ApiResponse<()>, String> {
     log::info!("========== 更新记录 ==========");
@@ -613,7 +895,7 @@ async fn update_record(
     
     let config = get_db_config();
     
-    let pk_obj = primary_key.as_object().ok_or("主键必须是对象")?;
+    let pk_obj = primaryKey.as_object().ok_or("主键必须是对象")?;
     let data_obj = data.as_object().ok_or("数据必须是对象")?;
     
     let set_clauses: Vec<String> = data_obj.iter()
@@ -677,14 +959,14 @@ async fn update_record(
 async fn delete_record(
     database: String,
     table: String,
-    primary_key: serde_json::Value,
+    primaryKey: serde_json::Value,
 ) -> Result<ApiResponse<()>, String> {
     log::info!("========== 删除记录 ==========");
     log::info!("数据库: {}, 表: {}", database, table);
     
     let config = get_db_config();
     
-    let pk_obj = primary_key.as_object().ok_or("主键必须是对象")?;
+    let pk_obj = primaryKey.as_object().ok_or("主键必须是对象")?;
     
     let where_clauses: Vec<String> = pk_obj.iter()
         .map(|(k, v)| {
@@ -729,6 +1011,140 @@ async fn delete_record(
     })
 }
 
+// Batch Data Operations Commands
+
+/// 批量更新多行数据
+#[tauri::command]
+async fn batch_update_rows(
+    database: String,
+    schema: String,
+    table: String,
+    updates: Vec<crate::models::data::RowUpdate>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BatchOperationResponse, String> {
+    log::info!("========== 批量更新行 ==========");
+    log::info!("数据库: {}, 表: {}.{}, 更新数量: {}", database, schema, table, updates.len());
+    
+    let config = get_db_config();
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let mut connections = state.connections.lock().await;
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    let result = transaction_manager::batch_update_rows(client, &schema, &table, updates).await;
+    
+    log::info!("批量更新完成: success={}, rows_affected={}", result.success, result.rows_affected);
+    Ok(result)
+}
+
+/// 批量插入多行数据
+#[tauri::command]
+async fn batch_insert_rows(
+    database: String,
+    schema: String,
+    table: String,
+    rows: Vec<std::collections::HashMap<String, serde_json::Value>>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BatchOperationResponse, String> {
+    log::info!("========== 批量插入行 ==========");
+    log::info!("数据库: {}, 表: {}.{}, 插入数量: {}", database, schema, table, rows.len());
+    
+    let config = get_db_config();
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let mut connections = state.connections.lock().await;
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    let result = transaction_manager::batch_insert_rows(client, &schema, &table, rows).await;
+    
+    log::info!("批量插入完成: success={}, rows_affected={}", result.success, result.rows_affected);
+    Ok(result)
+}
+
+/// 批量删除多行数据
+#[tauri::command]
+async fn batch_delete_rows(
+    database: String,
+    schema: String,
+    table: String,
+    primary_keys: Vec<std::collections::HashMap<String, serde_json::Value>>,
+    state: tauri::State<'_, AppState>,
+) -> Result<BatchOperationResponse, String> {
+    log::info!("========== 批量删除行 ==========");
+    log::info!("数据库: {}, 表: {}.{}, 删除数量: {}", database, schema, table, primary_keys.len());
+    
+    let config = get_db_config();
+    let connection_string = format!(
+        "host={} port={} user={} password={} dbname={}",
+        config.host, config.port, config.user, config.password, database
+    );
+    
+    let mut connections = state.connections.lock().await;
+    let connection_key = format!("{}:{}", config.host, database);
+    
+    if !connections.contains_key(&connection_key) {
+        let (client, connection) = tokio_postgres::connect(&connection_string, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| format!("无法连接到数据库: {}", e))?;
+        
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                log::error!("数据库连接错误: {}", e);
+            }
+        });
+        
+        connections.insert(connection_key.clone(), client);
+    }
+    
+    let client = connections.get(&connection_key)
+        .ok_or_else(|| "无法获取数据库连接".to_string())?;
+    
+    let result = transaction_manager::batch_delete_rows(client, &schema, &table, primary_keys).await;
+    
+    log::info!("批量删除完成: success={}, rows_affected={}", result.success, result.rows_affected);
+    Ok(result)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     setup_logger().expect("无法设置日志");
@@ -737,10 +1153,18 @@ pub fn run() {
     log::info!("PostgreSQL 数据库工具启动中 (pg_dump/pg_restore)...");
     log::info!("========================================");
 
+    let app_state = AppState::new();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
+            execute_sql,
+            get_table_schema,
+            create_table,
+            alter_table,
+            get_database_objects,
             export_database,
             import_database,
             list_databases,
@@ -751,7 +1175,10 @@ pub fn run() {
             get_table_data,
             create_record,
             update_record,
-            delete_record
+            delete_record,
+            batch_update_rows,
+            batch_insert_rows,
+            batch_delete_rows
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");

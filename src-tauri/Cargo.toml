@@ -33,3 +33,6 @@ dirs = "5.0"
 flate2 = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 postgres-types = { version = "0.2", features = ["derive", "with-uuid-1"] }
+
+[dev-dependencies]
+proptest = "1.4"

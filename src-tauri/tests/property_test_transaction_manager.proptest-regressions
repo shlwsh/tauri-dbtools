@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f6bcfa9045fc89bc40083b8ee0719f26a804de021877e44268de33e90af69533 # shrinks to updates = [RowUpdate { primary_key: {"id": Number(2)}, changes: {"col4": Number(0)} }, RowUpdate { primary_key: {"id": Number(2)}, changes: {"col4": Number(18717469)} }]

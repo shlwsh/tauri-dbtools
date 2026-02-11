@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b870cfc862e66448e49ed7b4bfd2e48698b44405bc86b810682d66715661d76a # shrinks to sql = "SELECT upper('auaokbczmesne') as upper_text, length('auaokbczmesne') as len"
+cc 3be144e549422930e73878d2875286121c6515898210836ce2c4b1d7f8e884ad # shrinks to (setup, insert, delete, cleanup) = ("CREATE TABLE IF NOT EXISTS test_delete_83 (id INTEGER PRIMARY KEY, name VARCHAR(100))", "INSERT INTO test_delete_83 (id, name) VALUES (83, 'idjfqw')", "DELETE FROM test_delete_83 WHERE id = 83", "DROP TABLE IF EXISTS test_delete_83")
+cc 1c934501f3c8a7e090a68bb8fd9d915312cdd5f09ab2f796fe73a34dac62eadf # shrinks to (setup, insert, update, cleanup) = ("CREATE TABLE IF NOT EXISTS test_update_201 (id INTEGER PRIMARY KEY, name VARCHAR(100))", "INSERT INTO test_update_201 (id, name) VALUES (201, 'uxi')", "UPDATE test_update_201 SET name = 'ebkcsm' WHERE id = 201", "DROP TABLE IF EXISTS test_update_201")
+cc e04e20838a32b9834229cb51000fdb1691a75cbf7e6f4726cb8cafb6f353358c # shrinks to (setup, insert, cleanup) = ("CREATE TABLE IF NOT EXISTS test_insert_343 (id INTEGER PRIMARY KEY, name VARCHAR(100))", "INSERT INTO test_insert_343 (id, name) VALUES (343, 'usbem')", "DROP TABLE IF EXISTS test_insert_343")
+cc 2f46479339b4d80d083d70dbb325b95e0d9959e3870ac9917f1bc50b904920f0 # shrinks to (statements, expected_type, setup, cleanup) = (["UPDATE test_multi_update_574 SET value = 0 WHERE id = 574"], Update, "CREATE TABLE IF NOT EXISTS test_multi_update_574 (id INTEGER PRIMARY KEY, value INTEGER); INSERT INTO test_multi_update_574 (id, value) VALUES (574, 0)", "DROP TABLE IF EXISTS test_multi_update_574")

@@ -9,6 +9,7 @@ import fc from 'fast-check';
 import { setActivePinia, createPinia } from 'pinia';
 import { useThemeStore } from '@/stores/theme';
 import { useConfigStore } from '@/stores/config';
+import { AutoCompleter } from '@/services/auto-completer';
 import type { DatabaseConnection, AppConfig } from '@/types/config';
 import {
   isValidConfig,
@@ -265,6 +266,115 @@ describe('Property-Based Tests', () => {
         expect(hasEmptyName || hasEmptyHost || hasInvalidPort).toBe(true);
       }),
       { numRuns: 100 }
+    );
+  });
+
+  /**
+   * Feature: database-advanced-features
+   * Property 1: 自动完成关键字匹配
+   * Validates: Requirements 1.3
+   *
+   * 对于任何 SQL 关键字前缀字符串，自动完成器返回的建议列表中的所有关键字
+   * 都应该以该前缀开始（不区分大小写）
+   */
+  it('Property 1: Auto-complete keyword matching', () => {
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1, maxLength: 10 }).filter(s => /^[a-zA-Z]+$/.test(s)),
+        (prefix) => {
+          const completer = new AutoCompleter();
+          const suggestions = completer.getKeywordSuggestions(prefix);
+
+          // All suggestions should start with the prefix (case-insensitive)
+          const lowerPrefix = prefix.toLowerCase();
+          for (const keyword of suggestions) {
+            expect(keyword.toLowerCase().startsWith(lowerPrefix)).toBe(true);
+          }
+
+          // If there are suggestions, they should all be non-empty strings
+          if (suggestions.length > 0) {
+            for (const keyword of suggestions) {
+              expect(keyword.length).toBeGreaterThan(0);
+              expect(typeof keyword).toBe('string');
+            }
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  /**
+   * Feature: database-advanced-features
+   * Property 2: 自动完成数据库对象匹配
+   * Validates: Requirements 1.4
+   *
+   * 对于任何数据库对象名称前缀字符串和当前数据库，自动完成器返回的对象名称
+   * 都应该存在于该数据库中，并且以该前缀开始（不区分大小写）
+   *
+   * Note: This test uses mock data since we don't have a real database connection in tests
+   */
+  it('Property 2: Auto-complete database object matching', async () => {
+    // Mock database objects
+    const mockTables = ['users', 'posts', 'comments', 'user_profiles', 'post_tags'];
+    const mockColumns = ['id', 'name', 'email', 'created_at', 'updated_at'];
+
+    // Create a completer with mocked cache
+    const completer = new AutoCompleter();
+    
+    // Pre-populate cache with mock data
+    const mockDatabase = 'test_db';
+    const tableItems = mockTables.map(table => ({
+      label: table,
+      kind: 'table' as const,
+      detail: 'Table',
+    }));
+    const columnItems = mockColumns.map(col => ({
+      label: col,
+      kind: 'column' as const,
+      detail: 'Column',
+    }));
+    
+    // Access private cache (for testing purposes)
+    (completer as any).databaseObjectsCache.set(`${mockDatabase}:tables`, tableItems);
+    (completer as any).databaseObjectsCache.set(`${mockDatabase}:columns`, columnItems);
+    (completer as any).cacheExpiry.set(`${mockDatabase}:tables`, Date.now());
+    (completer as any).cacheExpiry.set(`${mockDatabase}:columns`, Date.now());
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.string({ minLength: 1, maxLength: 5 }).filter(s => /^[a-zA-Z_]+$/.test(s)),
+        async (prefix) => {
+          // Test table suggestions
+          const tableSuggestions = await completer.getDatabaseObjectSuggestions(
+            mockDatabase,
+            prefix,
+            'tables'
+          );
+
+          // All suggestions should start with the prefix (case-insensitive)
+          const lowerPrefix = prefix.toLowerCase();
+          for (const table of tableSuggestions) {
+            expect(table.toLowerCase().startsWith(lowerPrefix)).toBe(true);
+            // Should be one of the mock tables
+            expect(mockTables.includes(table)).toBe(true);
+          }
+
+          // Test column suggestions
+          const columnSuggestions = await completer.getDatabaseObjectSuggestions(
+            mockDatabase,
+            prefix,
+            'columns'
+          );
+
+          for (const column of columnSuggestions) {
+            expect(column.toLowerCase().startsWith(lowerPrefix)).toBe(true);
+            // Should be one of the mock columns
+            expect(mockColumns.includes(column)).toBe(true);
+          }
+        }
+      ),
+      { numRuns: 50 }
     );
   });
 });

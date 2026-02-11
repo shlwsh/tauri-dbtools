@@ -34,7 +34,7 @@ export async function getTableData(
     database,
     table,
     page,
-    page_size: pageSize,
+    pageSize,
   });
 }
 
@@ -71,7 +71,7 @@ export async function updateRecord(
   return await invokeCommand<void>('update_record', {
     database,
     table,
-    primary_key: primaryKey,
+    primaryKey,
     data,
   });
 }
@@ -90,6 +90,6 @@ export async function deleteRecord(
   return await invokeCommand<void>('delete_record', {
     database,
     table,
-    primary_key: primaryKey,
+    primaryKey,
   });
 }

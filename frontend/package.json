@@ -12,12 +12,15 @@
     "format": "prettier --write \"src/**/*.{vue,ts,js,json,css}\""
   },
   "dependencies": {
+    "@monaco-editor/loader": "^1.7.0",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
-    "vue": "^3.4.0",
-    "vue-router": "^4.2.0",
+    "@vicons/ionicons5": "^0.13.0",
+    "monaco-editor": "^0.55.1",
+    "naive-ui": "^2.38.0",
     "pinia": "^2.1.0",
-    "naive-ui": "^2.38.0"
+    "vue": "^3.4.0",
+    "vue-router": "^4.2.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

@@ -4,43 +4,65 @@
       <n-notification-provider>
         <n-dialog-provider>
           <n-layout has-sider style="height: 100vh">
+            <!-- Activity Bar (Left Icon Bar) -->
             <n-layout-sider
               bordered
-              collapse-mode="width"
-              :collapsed-width="64"
-              :width="240"
-              show-trigger
+              :width="48"
+              :collapsed-width="48"
               style="height: 100vh"
+              class="activity-bar"
             >
-              <n-menu
-                :value="currentRoute"
-                :options="menuOptions"
-                @update:value="handleMenuSelect"
-              />
+              <div class="activity-bar-content">
+                <div class="activity-icons">
+                  <n-tooltip
+                    v-for="item in activityItems"
+                    :key="item.key"
+                    placement="right"
+                  >
+                    <template #trigger>
+                      <div
+                        :class="['activity-icon', { active: currentRoute === item.key }]"
+                        @click="handleMenuSelect(item.key)"
+                      >
+                        <n-icon size="24">
+                          <component :is="item.icon" />
+                        </n-icon>
+                      </div>
+                    </template>
+                    {{ item.label }}
+                  </n-tooltip>
+                </div>
+                <div class="activity-icons-bottom">
+                  <n-tooltip placement="right">
+                    <template #trigger>
+                      <div class="activity-icon" @click="toggleTheme">
+                        <n-icon size="24">
+                          <component :is="isDark ? SunIcon : MoonIcon" />
+                        </n-icon>
+                      </div>
+                    </template>
+                    切换主题
+                  </n-tooltip>
+                </div>
+              </div>
             </n-layout-sider>
 
-            <n-layout>
+            <!-- Main Content -->
+            <n-layout style="height: 100vh">
               <n-layout-header
                 bordered
                 style="
-                  height: 60px;
-                  padding: 0 24px;
+                  height: 40px;
+                  padding: 0 16px;
                   display: flex;
                   align-items: center;
                   justify-content: space-between;
                 "
               >
-                <n-text strong style="font-size: 18px"> PostgreSQL Database Tool </n-text>
-                <n-button circle @click="toggleTheme">
-                  <template #icon>
-                    <n-icon>
-                      <component :is="isDark ? SunIcon : MoonIcon" />
-                    </n-icon>
-                  </template>
-                </n-button>
+                <n-text strong style="font-size: 14px">PostgreSQL Database Tool</n-text>
               </n-layout-header>
 
-              <n-layout-content style="height: calc(100vh - 60px); overflow: auto">
+              <n-layout-content style="height: calc(100vh - 40px); overflow: hidden">
                 <router-view />
               </n-layout-content>
             </n-layout>
@@ -63,15 +85,13 @@ import {
   NLayoutSider,
   NLayoutHeader,
   NLayoutContent,
-  NMenu,
   NText,
-  NButton,
   NIcon,
-  type MenuOption,
+  NTooltip,
 } from 'naive-ui';
 import { useTheme } from '@/composables/useTheme';
 
-// Icons (using simple SVG for now)
+// Icons
 const HomeIcon = () =>
   h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
     h('path', { d: 'M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z' }),
@@ -81,6 +101,20 @@ const DatabaseIcon = () =>
   h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
     h('path', {
       d: 'M12 3C7.58 3 4 4.79 4 7s3.58 4 8 4 8-1.79 8-4-3.58-4-8-4zM4 9v3c0 2.21 3.58 4 8 4s8-1.79 8-4V9c0 2.21-3.58 4-8 4s-8-1.79-8-4zm0 5v3c0 2.21 3.58 4 8 4s8-1.79 8-4v-3c0 2.21-3.58 4-8 4s-8-1.79-8-4z',
+    }),
+  ]);
+
+const ExportIcon = () =>
+  h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
+    h('path', {
+      d: 'M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z',
+    }),
+  ]);
+
+const ImportIcon = () =>
+  h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
+    h('path', {
+      d: 'M9 3L5 6.99h3V14h2V6.99h3L9 3zm7 14.01V10h-2v7.01h-3L15 21l4-3.99h-3z',
     }),
   ]);
 
@@ -109,31 +143,31 @@ const { currentTheme, isDark, toggleTheme } = useTheme();
 
 const currentRoute = computed(() => route.name as string);
 
-const menuOptions: MenuOption[] = [
+const activityItems = [
   {
     label: '首页',
     key: 'Home',
-    icon: () => h(NIcon, null, { default: () => h(HomeIcon) }),
-  },
-  {
-    label: '数据库导出',
-    key: 'Export',
-    icon: () => h(NIcon, null, { default: () => h(DatabaseIcon) }),
-  },
-  {
-    label: '数据库导入',
-    key: 'Import',
-    icon: () => h(NIcon, null, { default: () => h(DatabaseIcon) }),
+    icon: HomeIcon,
   },
   {
     label: '数据库资源管理器',
     key: 'Explorer',
-    icon: () => h(NIcon, null, { default: () => h(DatabaseIcon) }),
+    icon: DatabaseIcon,
+  },
+  {
+    label: '数据库导出',
+    key: 'Export',
+    icon: ExportIcon,
+  },
+  {
+    label: '数据库导入',
+    key: 'Import',
+    icon: ImportIcon,
   },
   {
     label: '配置',
     key: 'Settings',
-    icon: () => h(NIcon, null, { default: () => h(SettingsIcon) }),
+    icon: SettingsIcon,
   },
 ];
 
@@ -144,4 +178,50 @@ const handleMenuSelect = (key: string) => {
 
 <style>
 @import './assets/styles/global.css';
+
+.activity-bar {
+  background: var(--n-color);
+}
+
+.activity-bar-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  justify-content: space-between;
+}
+
+.activity-icons,
+.activity-icons-bottom {
+  display: flex;
+  flex-direction: column;
+}
+
+.activity-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.2s;
+}
+
+.activity-icon:hover {
+  background-color: var(--n-item-color-hover);
+}
+
+.activity-icon.active {
+  background-color: var(--n-item-color-active);
+}
+
+.activity-icon.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background-color: var(--n-color-target);
+}
 </style>
