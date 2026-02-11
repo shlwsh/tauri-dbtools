@@ -198,7 +198,7 @@
     - 实现"应用"和"保存为脚本"按钮
     - _Requirements: 7.1, 7.6, 7.7, 7.8, 7.9_
 
-- [~] 9. 实现后端Transaction Manager
+- [ ] 9. 实现后端Transaction Manager
   - [x] 9.1 实现Transaction Manager核心功能
     - 在src-tauri/src/services/transaction_manager.rs中实现事务管理
     - 实现batch_update_rows函数
