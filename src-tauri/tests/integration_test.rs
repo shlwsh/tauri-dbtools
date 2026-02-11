@@ -308,7 +308,7 @@ async fn export_database(
     let indexes_query = "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname NOT LIKE '%_pkey' ORDER BY indexname";
     if let Ok(indexes) = client.query(indexes_query, &[]).await {
         for idx_row in indexes {
-            let idx_name: String = idx_row.get(0);
+            let _idx_name: String = idx_row.get(0);
             let idx_def: String = idx_row.get(1);
             writeln!(writer, "\n{};", idx_def)?;
         }
@@ -377,7 +377,7 @@ async fn import_database(
     let mut create_table_count = 0;
     let mut insert_count = 0;
 
-    for (line_num, line) in reader.lines().enumerate() {
+    for (_line_num, line) in reader.lines().enumerate() {
         let line = line?;
         let trimmed = line.trim();
 

@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "bun-db-tool",
+      "dependencies": {
+        "uv": "^1.4.0",
+      },
       "devDependencies": {
         "@tauri-apps/cli": "^2.0.0",
       },
@@ -820,6 +823,8 @@
     "url-parse": ["url-parse@1.5.10", "", { "dependencies": { "querystringify": "^2.1.1", "requires-port": "^1.0.0" } }, "sha512-WypcfiRhfeUP9vvF0j6rw0J3hrWrw6iZv3+22h6iRMJ/8z1Tj6XfLP4DsUix5MhMPnXpiHDoKyoZ/bdCkwBCiQ=="],
 
     "util-deprecate": ["util-deprecate@1.0.2", "", {}, "sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw=="],
+
+    "uv": ["uv@1.4.0", "", {}, "sha512-l5HfbQEbCBJwO536Do930OmcZFMr9detnT/8jPLmzX/fm+aGx2/UTRsHOkra1SEm6NkXi7FyiROa/oGH8Eo87g=="],
 
     "vdirs": ["vdirs@0.1.8", "", { "dependencies": { "evtd": "^0.2.2" }, "peerDependencies": { "vue": "^3.0.11" } }, "sha512-H9V1zGRLQZg9b+GdMk8MXDN2Lva0zx72MPahDKc30v+DtwKjfyOSXWRIX4t2mhDubM1H09gPhWeth/BJWPHGUw=="],
 

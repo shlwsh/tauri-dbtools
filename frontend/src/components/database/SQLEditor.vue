@@ -460,9 +460,9 @@ const handleExecute = async () => {
       });
 
       // Show success notification
-      if (response.data.type === 'select') {
-        notification.showSuccess(`Query executed successfully. ${response.data.rowCount || 0} rows returned in ${duration}ms`);
-      } else if (response.data.type === 'dml') {
+      if (response.data.resultType === 'Select') {
+        notification.showSuccess(`Query executed successfully. ${response.data.rows?.length || 0} rows returned in ${duration}ms`);
+      } else if (response.data.resultType === 'Insert' || response.data.resultType === 'Update' || response.data.resultType === 'Delete') {
         notification.showSuccess(`Query executed successfully. ${response.data.affectedRows || 0} rows affected in ${duration}ms`);
       } else {
         notification.showSuccess(`Query executed successfully in ${duration}ms`);
@@ -470,8 +470,8 @@ const handleExecute = async () => {
     } else {
       // Handle error
       const errorResult = {
-        type: 'error' as const,
-        duration,
+        resultType: 'Error' as const,
+        durationMs: duration,
         error: response.message || 'Unknown error occurred',
       };
       

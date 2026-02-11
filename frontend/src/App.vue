@@ -125,6 +125,13 @@ const SettingsIcon = () =>
     }),
   ]);
 
+const TestIcon = () =>
+  h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
+    h('path', {
+      d: 'M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z',
+    }),
+  ]);
+
 const MoonIcon = () =>
   h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
     h('path', { d: 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z' }),
@@ -163,6 +170,11 @@ const activityItems = [
     label: '数据库导入',
     key: 'Import',
     icon: ImportIcon,
+  },
+  {
+    label: 'SQL 执行测试',
+    key: 'TestSql',
+    icon: TestIcon,
   },
   {
     label: '配置',

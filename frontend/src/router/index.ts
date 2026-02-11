@@ -30,6 +30,11 @@ const routes = [
     name: 'Settings',
     component: () => import('@/views/Settings.vue'),
   },
+  {
+    path: '/test-sql',
+    name: 'TestSql',
+    component: () => import('@/views/TestSqlExecution.vue'),
+  },
 ];
 
 export const router = createRouter({

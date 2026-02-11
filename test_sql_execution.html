@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL 执行测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .result {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+        .error {
+            background: #ffebee;
+            color: #c62828;
+        }
+        .success {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            box-sizing: border-box;
+        }
+        textarea {
+            min-height: 100px;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <h1>SQL 执行测试工具</h1>
+    <p>此工具用于测试前端 API 调用后端 execute_sql 命令</p>
+
+    <div class="test-section">
+        <h2>测试配置</h2>
+        <label>数据库名称：</label>
+        <input type="text" id="database" value="草稿1" placeholder="输入数据库名称">
+        
+        <label>SQL 语句：</label>
+        <textarea id="sqlQuery" placeholder="输入 SQL 语句">SELECT * FROM employees LIMIT 5;</textarea>
+        
+        <button onclick="testExecuteSql()">执行 SQL</button>
+        <button onclick="testListDatabases()">列出数据库</button>
+    </div>
+
+    <div class="test-section">
+        <h2>测试结果</h2>
+        <div id="result" class="result">等待执行...</div>
+    </div>
+
+    <script>
+        // 检查是否在 Tauri 环境中
+        const isTauri = window.__TAURI__ !== undefined;
+        
+        if (!isTauri) {
+            document.getElementById('result').innerHTML = 
+                '<span class="error">错误：此页面必须在 Tauri 应用中运行！</span>';
+        }
+
+        async function testExecuteSql() {
+            const resultDiv = document.getElementById('result');
+            const database = document.getElementById('database').value;
+            const sql = document.getElementById('sqlQuery').value;
+
+            if (!database || !sql) {
+                resultDiv.innerHTML = '<span class="error">请输入数据库名称和 SQL 语句</span>';
+                return;
+            }
+
+            resultDiv.innerHTML = '正在执行 SQL...';
+
+            try {
+                console.log('调用 execute_sql 命令:', { database, sql });
+                
+                const result = await window.__TAURI__.core.invoke('execute_sql', {
+                    database: database,
+                    sql: sql
+                });
+
+                console.log('执行结果:', result);
+
+                resultDiv.className = 'result success';
+                resultDiv.innerHTML = `
+<strong>✓ 执行成功</strong>
+
+响应数据：
+${JSON.stringify(result, null, 2)}
+
+成功状态: ${result.success}
+消息: ${result.message}
+结果类型: ${result.data?.resultType || 'N/A'}
+执行时间: ${result.data?.durationMs || 'N/A'} ms
+${result.data?.rows ? `返回行数: ${result.data.rows.length}` : ''}
+${result.data?.affectedRows ? `影响行数: ${result.data.affectedRows}` : ''}
+                `.trim();
+
+            } catch (error) {
+                console.error('执行失败:', error);
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = `
+<strong>✗ 执行失败</strong>
+
+错误信息：
+${error.message || error}
+
+错误详情：
+${JSON.stringify(error, null, 2)}
+                `.trim();
+            }
+        }
+
+        async function testListDatabases() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '正在获取数据库列表...';
+
+            try {
+                console.log('调用 list_databases 命令');
+                
+                const result = await window.__TAURI__.core.invoke('list_databases');
+
+                console.log('数据库列表:', result);
+
+                resultDiv.className = 'result success';
+                resultDiv.innerHTML = `
+<strong>✓ 获取成功</strong>
+
+数据库列表：
+${JSON.stringify(result, null, 2)}
+                `.trim();
+
+            } catch (error) {
+                console.error('获取失败:', error);
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = `
+<strong>✗ 获取失败</strong>
+
+错误信息：
+${error.message || error}
+                `.trim();
+            }
+        }
+
+        // 页面加载时显示环境信息
+        window.addEventListener('DOMContentLoaded', () => {
+            console.log('Tauri 环境:', isTauri);
+            console.log('Tauri API:', window.__TAURI__);
+        });
+    </script>
+</body>
+</html>

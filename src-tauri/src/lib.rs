@@ -161,7 +161,7 @@ async fn execute_sql(
     database: String,
     sql: String,
     state: tauri::State<'_, AppState>,
-) -> Result<QueryResult, String> {
+) -> Result<ApiResponse<QueryResult>, String> {
     log::info!("========== 执行 SQL ==========");
     log::info!("数据库: {}", database);
     log::info!("SQL: {}", sql);
@@ -206,7 +206,61 @@ async fn execute_sql(
     
     log::info!("SQL 执行完成，耗时: {} ms", result.duration_ms);
     
-    Ok(result)
+    // 记录 SQL 执行日志
+    if let Ok(log_dir) = get_log_dir() {
+        if let Ok(logger) = services::sql_logger::SqlLogger::new(log_dir) {
+            let log_entry = if result.result_type == models::query::QueryResultType::Error {
+                services::sql_logger::SqlLogEntry::error(
+                    database.clone(),
+                    sql.clone(),
+                    result.duration_ms,
+                    result.error.clone().unwrap_or_else(|| "未知错误".to_string()),
+                    result.error_position.as_ref().map(|pos| format!("Line {}, Column {}", pos.line, pos.column)),
+                )
+            } else {
+                let query_type = match result.result_type {
+                    models::query::QueryResultType::Select => "SELECT",
+                    models::query::QueryResultType::Insert => "INSERT",
+                    models::query::QueryResultType::Update => "UPDATE",
+                    models::query::QueryResultType::Delete => "DELETE",
+                    models::query::QueryResultType::Ddl => "DDL",
+                    _ => "UNKNOWN",
+                }.to_string();
+
+                services::sql_logger::SqlLogEntry::success(
+                    database.clone(),
+                    sql.clone(),
+                    result.duration_ms,
+                    query_type,
+                    result.affected_rows,
+                    result.rows.as_ref().map(|rows| rows.len()),
+                )
+            };
+
+            if let Err(e) = logger.log(&log_entry) {
+                log::warn!("无法写入 SQL 日志: {}", e);
+            } else {
+                log::debug!("SQL 日志已记录到: {:?}", logger.get_log_file_path());
+            }
+        }
+    }
+    
+    // 将 QueryResult 包装为 ApiResponse
+    let response = if result.result_type == models::query::QueryResultType::Error {
+        ApiResponse {
+            success: false,
+            message: result.error.clone().unwrap_or_else(|| "SQL 执行失败".to_string()),
+            data: Some(result),
+        }
+    } else {
+        ApiResponse {
+            success: true,
+            message: "SQL 执行成功".to_string(),
+            data: Some(result),
+        }
+    };
+    
+    Ok(response)
 }
 
 // Schema Management Commands
@@ -462,6 +516,7 @@ async fn export_database(database: String) -> Result<ApiResponse<String>, String
 
 // 使用 pg_restore 导入数据库
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn import_database(
     filePath: String,
     database: String
@@ -689,6 +744,7 @@ async fn list_tables(database: String) -> Result<ApiResponse<Vec<TableInfo>>, St
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn get_table_data(
     database: String,
     table: String,
@@ -884,6 +940,7 @@ async fn create_record(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn update_record(
     database: String,
     table: String,
@@ -956,6 +1013,7 @@ async fn update_record(
 }
 
 #[tauri::command]
+#[allow(non_snake_case)]
 async fn delete_record(
     database: String,
     table: String,

@@ -12,5 +12,8 @@
   ],
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"
+  },
+  "dependencies": {
+    "uv": "^1.4.0"
   }
 }

@@ -35,17 +35,15 @@ export interface EditorTab {
  */
 export interface QueryResult {
   /** Type of query result */
-  type: 'select' | 'dml' | 'ddl' | 'error';
+  resultType: 'Select' | 'Insert' | 'Update' | 'Delete' | 'Ddl' | 'Error';
   /** Column information for SELECT queries */
   columns?: ColumnInfo[];
   /** Row data for SELECT queries */
   rows?: Record<string, any>[];
-  /** Total number of rows returned (for SELECT) */
-  rowCount?: number;
   /** Number of rows affected (for INSERT/UPDATE/DELETE) */
   affectedRows?: number;
   /** Query execution duration in milliseconds */
-  duration: number;
+  durationMs: number;
   /** Error message if query failed */
   error?: string;
   /** Position of error in SQL (if available) */

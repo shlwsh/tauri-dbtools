@@ -4,7 +4,7 @@
       <n-empty description="No query results yet. Execute a query to see results here." />
     </div>
 
-    <div v-else-if="result.type === 'error'" class="error-result">
+    <div v-else-if="result.resultType === 'Error'" class="error-result">
       <n-alert
         type="error"
         title="Query Error"
@@ -19,16 +19,16 @@
       </n-alert>
     </div>
 
-    <div v-else-if="result.type === 'select'" class="select-result">
+    <div v-else-if="result.resultType === 'Select'" class="select-result">
       <!-- Stats and Export -->
       <div class="result-stats">
         <n-space justify="space-between">
           <n-space>
             <n-tag type="success">
-              {{ result.rowCount || 0 }} rows returned
+              {{ result.rows?.length || 0 }} rows returned
             </n-tag>
             <n-tag type="info">
-              Execution time: {{ result.duration }}ms
+              Execution time: {{ result.durationMs }}ms
             </n-tag>
           </n-space>
 
@@ -67,26 +67,26 @@
       </div>
     </div>
 
-    <div v-else-if="result.type === 'dml'" class="dml-result">
+    <div v-else-if="result.resultType === 'Insert' || result.resultType === 'Update' || result.resultType === 'Delete'" class="dml-result">
       <n-alert
         type="success"
         title="Query Executed Successfully"
       >
         <div class="dml-content">
           <p>{{ result.affectedRows || 0 }} rows affected</p>
-          <p class="execution-time">Execution time: {{ result.duration }}ms</p>
+          <p class="execution-time">Execution time: {{ result.durationMs }}ms</p>
         </div>
       </n-alert>
     </div>
 
-    <div v-else-if="result.type === 'ddl'" class="ddl-result">
+    <div v-else-if="result.resultType === 'Ddl'" class="ddl-result">
       <n-alert
         type="success"
         title="DDL Executed Successfully"
       >
         <div class="ddl-content">
           <p>Command completed successfully</p>
-          <p class="execution-time">Execution time: {{ result.duration }}ms</p>
+          <p class="execution-time">Execution time: {{ result.durationMs }}ms</p>
         </div>
       </n-alert>
     </div>
@@ -155,7 +155,7 @@ const exportOptions = computed<DropdownOption[]>(() => [
  * 处理导出格式选择
  */
 async function handleExportSelect(key: string) {
-  if (!props.result || props.result.type !== 'select' || !props.result.rows || !props.result.columns) {
+  if (!props.result || props.result.resultType !== 'Select' || !props.result.rows || !props.result.columns) {
     message.error('没有可导出的数据');
     return;
   }
@@ -187,7 +187,7 @@ async function handleExportSelect(key: string) {
   }
 }
 const tableColumns = computed<DataTableColumns<Record<string, any>>>(() => {
-  if (!props.result || props.result.type !== 'select' || !props.result.columns) {
+  if (!props.result || props.result.resultType !== 'Select' || !props.result.columns) {
     return [];
   }
 
@@ -219,7 +219,7 @@ const tableColumns = computed<DataTableColumns<Record<string, any>>>(() => {
 });
 
 const scrollX = computed(() => {
-  if (!props.result || props.result.type !== 'select' || !props.result.columns) {
+  if (!props.result || props.result.resultType !== 'Select' || !props.result.columns) {
     return undefined;
   }
   

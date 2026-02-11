@@ -144,7 +144,7 @@
     - 添加get_database_objects命令（用于自动完成）
     - _Requirements: 7.6, 13.3, 13.4_
 
-- [-] 7. 实现前端Table Designer Store
+- [x] 7. 实现前端Table Designer Store
   - [x] 7.1 创建Table Designer Store
     - 在frontend/src/stores/table-designer.ts中实现TableDesignerStore
     - 实现设计器打开/关闭状态管理
@@ -162,7 +162,7 @@
     - 实现addIndex、deleteIndex
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 6.9_
 
-- [ ] 8. 实现Table Designer UI组件
+- [x] 8. 实现Table Designer UI组件
   - [x] 8.1 创建TableDesigner主组件
     - 在frontend/src/components/database/TableDesigner.vue中创建组件
     - 实现模态对话框布局
@@ -198,7 +198,7 @@
     - 实现"应用"和"保存为脚本"按钮
     - _Requirements: 7.1, 7.6, 7.7, 7.8, 7.9_
 
-- [ ] 9. 实现后端Transaction Manager
+- [x] 9. 实现后端Transaction Manager
   - [x] 9.1 实现Transaction Manager核心功能
     - 在src-tauri/src/services/transaction_manager.rs中实现事务管理
     - 实现batch_update_rows函数

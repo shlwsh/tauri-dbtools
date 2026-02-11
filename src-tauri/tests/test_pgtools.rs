@@ -1,6 +1,5 @@
 // 集成测试 - 使用 pg_dump/pg_restore 测试导出导入功能
 use std::process::Command;
-use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

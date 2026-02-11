@@ -8,3 +8,4 @@ pub mod query_executor;
 pub mod schema_service;
 pub mod ddl_generator;
 pub mod transaction_manager;
+pub mod sql_logger;
